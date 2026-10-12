@@ -52,7 +52,8 @@ Port of [SZ3](https://github.com/szcompressor/SZ3) (reference: v3.4.0, data form
 | Modules | BypassEncoder, TimeSeriesDecomposition, SZExaaltCompressor, k-means utils | done |
 | Tools | `sz3` CLI | done |
 | Tools | `mdz` (8/8 cases match C++: per-batch choice, ratio, max error) | done |
-| Tools | C API (`sz3c.h`), Python bindings (pysz), HDF5 filter (H5Z-SZ3) | todo |
+| Tools | C API (`sz3c.h`, `libSZ3c`): same output as C++ libSZ3c | done |
+| Tools | Python bindings (pysz), HDF5 filter (H5Z-SZ3) | todo |
 | Tests | port SZ3's module tests (tools/test/modules) | todo |
 | Verification | cross-check matrix (692 cases incl. OpenMP and BioMD) + SDRBench real data, AMD and Intel | done |
 

@@ -1,0 +1,13 @@
+[package]
+name = "sz3-capi"
+version = "0.1.0"
+edition = "2024"
+description = "C API of sz3-rust, compatible with SZ3's sz3c.h"
+
+[lib]
+name = "SZ3c"
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+sz3 = { path = ".." }
+libc = "0.2"

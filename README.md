@@ -92,3 +92,14 @@ python3 scripts/crosscheck.py /path/to/cpp/sz3 target/release/sz3 <data dir> <wo
 
 Commits end with a `Co-Authored-By: Claude <noreply@anthropic.com>` trailer. Enable the template
 that adds it with `git config commit.template .gitmessage`.
+
+## C API
+
+`capi/` builds `libSZ3c` (shared and static) with SZ3's `sz3c.h` (`capi/include/`):
+`SZ_compress_args`, `SZ_decompress`, `free_buf`. A C program built against C++ SZ3's `libSZ3c`
+gives the same streams and values with this one (`capi/tests/sz3c_test.c`).
+
+```sh
+cargo build --release -p sz3-capi     # target/release/libSZ3c.{so,a}
+cc -Icapi/include prog.c -Ltarget/release -lSZ3c
+```
