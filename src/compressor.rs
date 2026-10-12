@@ -64,7 +64,7 @@ impl<T: SzFloat, D: Decomposition<T>, E: Encoder, L: Lossless> GenericCompressor
         self.decomposition.load(&mut r, conf)?;
         self.encoder.load(&mut r)?;
         let n = r.u64()?;
-        if n > conf.num as u64 {
+        if n > self.decomposition.max_bins(conf) as u64 {
             return corrupt("more bins than the data has elements");
         }
         let bins = self.encoder.decode(&mut r, n as usize)?;
@@ -91,5 +91,8 @@ impl<T: SzFloat> Decomposition<T> for Box<dyn Decomposition<T>> {
     }
     fn size_est(&self) -> usize {
         (**self).size_est()
+    }
+    fn max_bins(&self, conf: &Config) -> usize {
+        (**self).max_bins(conf)
     }
 }

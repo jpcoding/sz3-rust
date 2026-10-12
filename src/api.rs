@@ -258,7 +258,15 @@ pub fn dispatch_compress<F: SzFloat>(conf: &mut Config, data: &[F], out: &mut Ve
         let n = conf.n as usize;
         let mut copy = data.to_vec();
         let r = match conf.cmpr_algo {
-            A::BIOMD => Err(Error::Unsupported("ALGO_BIOMD is not ported yet".into())),
+            // BioMD only reads its input and makes no lossless-ratio check.
+            A::BIOMD => match algo::compress_biomd::<F>(conf, data, out, cap) {
+                Err(Error::BufferTooSmall) => {
+                    out.truncate(start);
+                    conf.cmpr_algo = A::LOSSLESS;
+                    return Zstd::default().compress(&to_bytes(data), out, cap);
+                }
+                r => return r,
+            },
             A::LORENZO_REG => with_n!(n, N => algo::compress_lorenzo_reg::<F, N>(conf, &mut copy, out, cap)),
             A::INTERP => with_n!(n, N => algo::compress_interp::<F, N>(conf, &mut copy, out, cap)),
             A::INTERP_LORENZO => with_n!(n, N => algo::compress_interp_lorenzo::<F, N>(conf, &mut copy, out, cap)),
@@ -391,7 +399,7 @@ pub fn dispatch_decompress<F: SzFloat>(conf: &Config, cmp: &[u8], out: &mut [F])
         A::LORENZO_REG => with_n!(n, N => algo::decompress_lorenzo_reg::<F, N, HuffmanEncoder>(conf, cmp, out)),
         A::INTERP => with_n!(n, N => algo::decompress_interp::<F, N, HuffmanEncoder>(conf, cmp, out)),
         A::NOPRED => algo::decompress_nopred::<F>(conf, cmp, out),
-        A::BIOMD => Err(Error::Unsupported("ALGO_BIOMD is not ported yet".into())),
+        A::BIOMD => algo::decompress_biomd::<F>(conf, cmp, out),
         _ => Err(Error::InvalidArgument("Unknown compression algorithm".into())),
     }
 }

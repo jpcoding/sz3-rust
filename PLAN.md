@@ -43,17 +43,17 @@ Port of [SZ3](https://github.com/szcompressor/SZ3) (reference: v3.4.0, data form
 | Core | Config (binary + INI), header, version checks | done |
 | Core | Huffman (3.4.0), linear quantizer, zstd/bypass lossless | done |
 | Algorithms | INTERP_LORENZO (tuning), INTERP, LORENZO_REG, NOPRED, LOSSLESS | done |
-| Algorithms | ALGO_BIOMD (SZBioMDDecomposition + SegmentedEncoder) | todo |
+| Algorithms | ALGO_BIOMD (SZBioMDDecomposition + SegmentedEncoder) | done |
 | Data | f32/f64, 8/16/32/64-bit integers, 1–4 D, all error-bound modes | done |
 | Format | read OpenMP-chunked streams | done |
-| Format | write OpenMP-chunked streams (multithreaded compression) | todo |
-| Format | read 3.3.2 streams (HuffmanEncoderV1), golden streams from SZ3's test suite | todo |
+| Format | write OpenMP-chunked streams (multithreaded compression) | done |
+| Format | read 3.3.2 streams (HuffmanEncoderV1), golden streams from SZ3's test suite | done |
 | Format | SZ3's official format digest (`data_format_digest.txt`, 3.4.0) | done |
 | Modules | BypassEncoder, TimeSeriesDecomposition, SZExaaltCompressor, k-means utils | todo |
 | Tools | `sz3` CLI | done |
 | Tools | C API (`sz3c.h`), Python bindings (pysz), HDF5 filter (H5Z-SZ3), `mdz` | todo |
 | Tests | port SZ3's module tests (tools/test/modules) | todo |
-| Verification | cross-check matrix + SDRBench real data, AMD and Intel | done (AMD), running (Intel) |
+| Verification | cross-check matrix (692 cases incl. OpenMP and BioMD) + SDRBench real data, AMD and Intel | done |
 
 ## Layout
 

@@ -20,10 +20,10 @@ compressor for scientific data.
 | Error bounds ABS, REL, PSNR, NORM, ABS_AND_REL, ABS_OR_REL | done |
 | `f32`, `f64`, and 8/16/32/64-bit integers; 1–4 dimensions | done |
 | `sz3` CLI (same arguments as the C++ tool), INI config files | done |
-| Reading OpenMP-chunked streams | done |
-| Writing OpenMP-chunked streams (multithreaded compression) | planned |
-| Reading 3.3.2 streams (`HuffmanEncoderV1`) | planned |
-| `ALGO_BIOMD`, C API, Python bindings, HDF5 filter | planned |
+| `ALGO_BIOMD` (molecular dynamics) | done |
+| OpenMP-chunked streams, read and write (multithreaded, `OMP_NUM_THREADS`) | done |
+| Reading 3.3.2 streams (`HuffmanEncoderV1`) | done |
+| C API, Python bindings, HDF5 filter, `mdz` | planned |
 
 See [PLAN.md](PLAN.md) for the roadmap.
 
@@ -72,8 +72,9 @@ cargo build --release
 
 ## Verification
 
-`scripts/crosscheck.py` runs a matrix of synthetic datasets (1–4 D, `f32`/`f64`/`i32`/`i64`, all
-algorithms, ABS/REL/ABS_AND_REL bounds, predictor variants) through both the C++ and the Rust
+`scripts/crosscheck.py` runs a matrix of synthetic datasets from `scripts/gen_data.py` (1–4 D,
+`f32`/`f64`/`i32`/`i64`, all algorithms, ABS/REL/ABS_AND_REL bounds, predictor variants, OpenMP
+layout, BioMD trajectories) through both the C++ and the Rust
 `sz3`, and checks that the compressed streams are byte-identical and that each tool decodes the
 other's stream to the same values. `scripts/realdata.py` does the same on SDRBench fields
 (Hurricane, NYX, CESM, SCALE) and reports ratio and speed.

@@ -1,3 +1,5 @@
+#![allow(clippy::needless_range_loop)]
+
 use sz3::config::{algo, eb};
 use sz3::{Config, compress, compress_with, decompress};
 
@@ -183,4 +185,79 @@ fn openmp_layout_round_trips() {
             }
         }
     }
+}
+
+/// Coordinates (frames, atoms, 3) in nm: a bonded chain drifting between frames.
+fn trajectory(frames: usize, atoms: usize) -> Vec<f32> {
+    let mut seed: u64 = 9;
+    let mut rnd = move || {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        (seed >> 40) as f64 / (1u64 << 24) as f64 - 0.5
+    };
+    let mut x = vec![[0f64; 3]; atoms];
+    let mut p = [2.0, 2.0, 2.0];
+    for a in x.iter_mut() {
+        for c in 0..3 {
+            p[c] += rnd() * 0.17;
+        }
+        *a = p;
+    }
+    let mut out = Vec::new();
+    for _ in 0..frames {
+        for a in x.iter_mut() {
+            for c in 0..3 {
+                a[c] += rnd() * 0.004;
+                out.push(a[c] as f32);
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn biomd_round_trips_within_bound() {
+    for (frames, atoms) in [(1, 3000), (5, 2000)] {
+        let d = trajectory(frames, atoms);
+        let dims: Vec<usize> = if frames == 1 {
+            vec![atoms, 3]
+        } else {
+            vec![frames, atoms, 3]
+        };
+        for eb in [1e-3, 5e-5] {
+            let mut conf = Config::new(&dims);
+            conf.cmpr_algo = algo::BIOMD;
+            conf.abs_error_bound = eb;
+            let mut c = conf.clone();
+            let bytes = compress_with(&mut c, &d).unwrap();
+            assert_eq!(c.cmpr_algo, algo::BIOMD);
+            let (_, out) = decompress::<f32>(&bytes).unwrap();
+            for (x, y) in d.iter().zip(&out) {
+                assert!(((x - y).abs() as f64) <= eb, "{x} {y} {eb}");
+            }
+        }
+    }
+}
+
+#[test]
+fn biomd_fill_frames_and_nan_fallback() {
+    let (frames, atoms) = (4, 500);
+    let mut d = trajectory(frames, atoms);
+    // two trailing frames of NaN fill
+    d[2 * atoms * 3..].fill(f32::NAN);
+    let mut conf = Config::new(&[frames, atoms, 3]);
+    conf.cmpr_algo = algo::BIOMD;
+    let mut c = conf.clone();
+    let (_, out) = decompress::<f32>(&compress_with(&mut c, &d).unwrap()).unwrap();
+    assert_eq!(c.cmpr_algo, algo::BIOMD);
+    assert!(out[2 * atoms * 3..].iter().all(|v| v.is_nan()));
+    // a NaN before the fill: stored losslessly
+    d[10] = f32::NAN;
+    let mut c = conf.clone();
+    let (_, out) = decompress::<f32>(&compress_with(&mut c, &d).unwrap()).unwrap();
+    assert_eq!(c.cmpr_algo, algo::LOSSLESS);
+    assert!(out.iter().zip(&d).all(|(a, b)| a.to_bits() == b.to_bits()));
+    // a shape that is not coordinates is refused
+    let mut bad = Config::new(&[100, 4]);
+    bad.cmpr_algo = algo::BIOMD;
+    assert!(compress(&bad, &vec![0f32; 400]).is_err());
 }

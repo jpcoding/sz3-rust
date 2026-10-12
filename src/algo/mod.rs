@@ -5,11 +5,12 @@ pub mod sample;
 use crate::compressor::GenericCompressor;
 use crate::config::{Config, algo, interp};
 use crate::decomposition::{
-    BlockwiseDecomposition, Decomposition, InterpolationDecomposition, NoPredictionDecomposition,
+    BIOMD_NUM_STREAMS, BioMdDecomposition, BlockwiseDecomposition, Decomposition, InterpolationDecomposition,
+    NoPredictionDecomposition,
 };
-use crate::encoder::{Encoder, HuffmanEncoder};
+use crate::encoder::{Encoder, HuffmanEncoder, SegmentedEncoder};
 use crate::error::{Error, Result};
-use crate::lossless::{Lossless, Zstd};
+use crate::lossless::{Bypass, Lossless, Zstd};
 use crate::predictor::{ComposedPredictor, LorenzoPredictor, Predictor, RegressionPredictor};
 use crate::quantizer::LinearQuantizer;
 use crate::stats::{cal_abs_error_bound, factorial};
@@ -139,6 +140,49 @@ pub fn decompress_lorenzo_reg<T: SzFloat, const N: usize, E: Encoder + Default +
 ) -> Result<()> {
     let d = lorenzo_regression::<T, N, E>(conf, LinearQuantizer::default())?;
     GenericCompressor::new(d, E::default(), Zstd::default()).decompress(conf, cmp, out)
+}
+
+// ---------------------------------------------------------------- molecular dynamics
+
+fn biomd_compressor<T: SzFloat>(
+    conf: &Config,
+) -> Result<GenericCompressor<T, BioMdDecomposition<T>, SegmentedEncoder<HuffmanEncoder>, Bypass>> {
+    Ok(GenericCompressor::new(
+        BioMdDecomposition::new(conf)?,
+        SegmentedEncoder::new(BIOMD_NUM_STREAMS as u32),
+        Bypass,
+    ))
+}
+
+/// `ALGO_BIOMD` for `(atoms, 3)` or `(frames, atoms, 3)` coordinates; data it cannot code (NaN or
+/// Inf before trailing fill frames, coordinates beyond its lattice) is stored losslessly.
+pub fn compress_biomd<T: SzFloat>(conf: &mut Config, data: &[T], out: &mut Vec<u8>, cap: usize) -> Result<usize> {
+    cal_abs_error_bound(conf, data, None)?;
+    let n = conf.dims.len();
+    if n > 3 || conf.dims[n - 1] != 3 {
+        return Err(Error::InvalidArgument(
+            "ALGO_BIOMD: data must be of shape (atoms, 3) or (frames, atoms, 3)".into(),
+        ));
+    }
+    if conf.num > i32::MAX as usize {
+        return Err(Error::InvalidArgument(
+            "ALGO_BIOMD: more values than an int counts; compress fewer frames at a time".into(),
+        ));
+    }
+    let mut copy = data.to_vec();
+    match biomd_compressor::<T>(conf)?.compress(conf, &mut copy, out, cap) {
+        Err(Error::Fallback(_)) => {
+            conf.cmpr_algo = algo::LOSSLESS;
+            let mut raw = Vec::new();
+            crate::bytes::ByteWriter::put_slice(&mut raw, data);
+            Zstd::default().compress(&raw, out, cap)
+        }
+        r => r,
+    }
+}
+
+pub fn decompress_biomd<T: SzFloat>(conf: &Config, cmp: &[u8], out: &mut [T]) -> Result<()> {
+    biomd_compressor::<T>(conf)?.decompress(conf, cmp, out)
 }
 
 // ---------------------------------------------------------------- interpolation

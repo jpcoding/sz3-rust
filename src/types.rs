@@ -31,6 +31,15 @@ pub trait SzFloat:
     fn c(v: i32) -> Self;
     fn abs(self) -> Self;
     fn is_finite(self) -> bool;
+    /// `std::numeric_limits<T>::digits`.
+    const DIGITS: i32;
+    const MAX_F64: f64;
+    const DENORM_MIN_F64: f64;
+    /// Bits of +infinity.
+    const INF_BITS: u64;
+    /// The raw bits, zero-extended.
+    fn bits(self) -> u64;
+    fn from_bits_u64(b: u64) -> Self;
 }
 
 impl SzFloat for f32 {
@@ -59,6 +68,18 @@ impl SzFloat for f32 {
     #[inline(always)]
     fn is_finite(self) -> bool {
         f32::is_finite(self)
+    }
+    const DIGITS: i32 = 24;
+    const MAX_F64: f64 = f32::MAX as f64;
+    const DENORM_MIN_F64: f64 = 1e-45_f32 as f64;
+    const INF_BITS: u64 = 0x7f80_0000;
+    #[inline(always)]
+    fn bits(self) -> u64 {
+        self.to_bits() as u64
+    }
+    #[inline(always)]
+    fn from_bits_u64(b: u64) -> Self {
+        f32::from_bits(b as u32)
     }
 }
 
@@ -89,14 +110,18 @@ impl SzFloat for f64 {
     fn is_finite(self) -> bool {
         f64::is_finite(self)
     }
-}
-
-/// How an element type enters the pipeline.
-pub enum Repr<'a, T> {
-    F32(&'a [f32]),
-    F64(&'a [f64]),
-    /// Integers are compressed as the float type that holds them.
-    Int(&'a [T]),
+    const DIGITS: i32 = 53;
+    const MAX_F64: f64 = f64::MAX;
+    const DENORM_MIN_F64: f64 = 5e-324;
+    const INF_BITS: u64 = 0x7ff0_0000_0000_0000;
+    #[inline(always)]
+    fn bits(self) -> u64 {
+        self.to_bits()
+    }
+    #[inline(always)]
+    fn from_bits_u64(b: u64) -> Self {
+        f64::from_bits(b)
+    }
 }
 
 /// Any element type the public API accepts: floats, and integers which SZ3 compresses as

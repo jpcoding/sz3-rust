@@ -13,6 +13,8 @@ pub enum Error {
     Unsupported(String),
     /// The lossless backend failed.
     Lossless(String),
+    /// The data holds values the algorithm cannot code; the dispatcher stores it losslessly.
+    Fallback(String),
 }
 
 impl fmt::Display for Error {
@@ -23,6 +25,7 @@ impl fmt::Display for Error {
             Error::BufferTooSmall => write!(f, "The buffer for compressed data is not large enough."),
             Error::Unsupported(m) => write!(f, "unsupported: {m}"),
             Error::Lossless(m) => write!(f, "lossless backend: {m}"),
+            Error::Fallback(m) => write!(f, "{m}"),
         }
     }
 }

@@ -185,6 +185,118 @@ pub fn bytes2vector(r: &mut Reader, bit_width: u8, n: usize) -> Result<Vec<usize
     Ok(out)
 }
 
+/// Signed to unsigned with small magnitudes kept small: 0, -1, 1, -2, 2, ... to 0, 1, 2, 3, 4, ...
+#[inline(always)]
+pub fn zigzag(v: i64) -> u64 {
+    ((v as u64) << 1) ^ ((v >> 63) as u64)
+}
+
+#[inline(always)]
+pub fn unzigzag(u: u64) -> i64 {
+    ((u >> 1) as i64) ^ -((u & 1) as i64)
+}
+
+/// LEB128: 7 bits a byte, low first, the high bit set while more follow.
+pub fn write_varint(mut v: u64, out: &mut Vec<u8>) {
+    while v >= 128 {
+        out.push((v as u8) | 128);
+        v >>= 7;
+    }
+    out.push(v as u8);
+}
+
+pub fn read_varint(r: &mut Reader) -> Result<u64> {
+    let mut v: u64 = 0;
+    let mut shift = 0u32;
+    loop {
+        if r.remaining() == 0 || shift > 63 {
+            return corrupt("truncated or overlong varint");
+        }
+        let b = r.u8()?;
+        if shift == 63 && b > 1 {
+            return corrupt("truncated or overlong varint");
+        }
+        v |= ((b & 127) as u64) << shift;
+        if b < 128 {
+            return Ok(v);
+        }
+        shift += 7;
+    }
+}
+
+/// Bits appended LSB first, up to 56 at a time (SZ3's `BitAppender`).
+pub struct BitAppender<'a> {
+    out: &'a mut Vec<u8>,
+    pending: u64,
+    pending_bits: u32,
+}
+
+impl<'a> BitAppender<'a> {
+    pub fn new(out: &'a mut Vec<u8>) -> Self {
+        BitAppender {
+            out,
+            pending: 0,
+            pending_bits: 0,
+        }
+    }
+
+    /// `v < 2^bits`, `bits <= 56`.
+    #[inline(always)]
+    pub fn put(&mut self, v: u64, bits: u32) {
+        self.pending |= v << self.pending_bits;
+        self.pending_bits += bits;
+        if self.pending_bits < 64 {
+            return;
+        }
+        self.out.extend_from_slice(&self.pending.to_le_bytes());
+        self.pending_bits -= 64;
+        self.pending = v >> (bits - self.pending_bits);
+    }
+
+    pub fn flush(self) {
+        let n = self.pending_bits.div_ceil(8) as usize;
+        self.out.extend_from_slice(&self.pending.to_le_bytes()[..n]);
+    }
+}
+
+/// Bits read LSB first, up to 56 at a time; reading past the end fails (SZ3's `BitConsumer`).
+pub struct BitConsumer<'a> {
+    p: &'a [u8],
+    pending: u64,
+    pending_bits: u32,
+}
+
+impl<'a> BitConsumer<'a> {
+    pub fn new(p: &'a [u8]) -> Self {
+        BitConsumer {
+            p,
+            pending: 0,
+            pending_bits: 0,
+        }
+    }
+
+    #[inline(always)]
+    pub fn get(&mut self, bits: u32) -> Result<u64> {
+        while self.pending_bits < bits {
+            let Some((&b, rest)) = self.p.split_first() else {
+                return corrupt("bits read past the end");
+            };
+            self.p = rest;
+            self.pending |= (b as u64) << self.pending_bits;
+            self.pending_bits += 8;
+        }
+        let v = self.pending & ((1u64 << bits) - 1);
+        self.pending >>= bits;
+        self.pending_bits -= bits;
+        Ok(v)
+    }
+
+    /// Every byte taken.
+    pub fn at_end(&self) -> bool {
+        self.p.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,5 +311,34 @@ mod tests {
         assert_eq!(out.len(), (4 * 17usize).div_ceil(8));
         let mut r = Reader::new(&out);
         assert_eq!(bytes2vector(&mut r, w, 4).unwrap(), dims);
+    }
+
+    #[test]
+    fn bits_and_varints() {
+        let mut out = Vec::new();
+        let mut w = BitAppender::new(&mut out);
+        let vals: Vec<(u64, u32)> = (0..200u64)
+            .map(|i| (i * 2654435761 % (1 << (i % 57)), (i % 57) as u32))
+            .collect();
+        for &(v, b) in &vals {
+            w.put(v, b);
+        }
+        w.flush();
+        let mut r = BitConsumer::new(&out);
+        for &(v, b) in &vals {
+            assert_eq!(r.get(b).unwrap(), v);
+        }
+        assert!(r.at_end());
+        let mut buf = Vec::new();
+        for v in [0u64, 127, 128, 300, u64::MAX] {
+            write_varint(v, &mut buf);
+        }
+        let mut r = Reader::new(&buf);
+        for v in [0u64, 127, 128, 300, u64::MAX] {
+            assert_eq!(read_varint(&mut r).unwrap(), v);
+        }
+        for v in [0i64, -1, 1, i64::MIN, i64::MAX] {
+            assert_eq!(unzigzag(zigzag(v)), v);
+        }
     }
 }

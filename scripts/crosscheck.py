@@ -21,6 +21,14 @@ SHAPES = {
     "d3": (64, 128, 160),
     "d4": (20, 30, 40, 50),
 }
+# molecular-dynamics sets for ALGO_BIOMD: water + bonded chains, trailing NaN fill frames,
+# a coarse-grained frame, a NaN mid-trajectory (lossless fallback)
+MD = [
+    ("md", (6, 9400, 3), ("f32", "f64")),
+    ("mdfill", (6, 9400, 3), ("f32",)),
+    ("cg", (5000, 3), ("f32",)),
+    ("mdnan", (6, 9400, 3), ("f32",)),
+]
 TYPES = {"f32": ["-f"], "f64": ["-d"], "i32": ["-I", "32"], "i64": ["-I", "64"]}
 ALGOS = ["ALGO_INTERP_LORENZO", "ALGO_INTERP", "ALGO_LORENZO_REG", "ALGO_NOPRED", "ALGO_LOSSLESS"]
 BOUNDS = [["-M", "ABS", "1e-3"], ["-M", "REL", "1e-4"], ["-M", "ABS_AND_REL", "-A", "1e-2", "-R", "1e-5"]]
@@ -89,6 +97,37 @@ def main():
                 failures.append(f"{tag}: identical_stream={same} cross_decode={cross}")
         except RuntimeError as e:
             failures.append(f"{tag}: error {str(e)[:400]}")
+    # ALGO_BIOMD on molecular-dynamics coordinates (frames, atoms, 3), when the data dir has them
+    for name, shape, types in MD:
+        for ty in types:
+            src = os.path.join(data, f"{name}.{ty}")
+            if not os.path.exists(src) or (only and only not in name):
+                continue
+            for omp, eb in itertools.product((False, True), ("1e-3", "5e-5")):
+                tag = f"{name}.{ty}.biomd{'-omp' if omp else ''}.{eb}"
+                cfg = os.path.join(work, f"{tag}.cfg")
+                with open(cfg, "w") as f:
+                    f.write(f"[GlobalSettings]\nCmprAlgo = ALGO_BIOMD\nOpenMP = {str(omp).lower()}\n")
+                dims = [f"-{len(shape)}"] + [str(d) for d in reversed(shape)]
+                total += 1
+                try:
+                    base = TYPES[ty] + dims + ["-c", cfg, "-M", "ABS", eb]
+                    outs = {}
+                    for who, exe in (("c", cpp), ("r", rust)):
+                        run([exe] + base + ["-i", src, "-z", f"{work}/{tag}.{who}.sz"])
+                    same = read(f"{work}/{tag}.c.sz") == read(f"{work}/{tag}.r.sz")
+                    for who, exe in (("c", cpp), ("r", rust)):
+                        for stream in ("c", "r"):
+                            out = f"{work}/{tag}.{stream}.by{who}.out"
+                            run([exe] + TYPES[ty] + ["-s", f"{work}/{tag}.{stream}.sz", "-o", out])
+                            outs[(who, stream)] = read(out)
+                    cross = outs[("c", "r")] == outs[("r", "r")] and outs[("r", "c")] == outs[("c", "c")]
+                    if same and cross:
+                        ok += 1
+                    else:
+                        failures.append(f"{tag}: identical_stream={same} cross_decode={cross}")
+                except RuntimeError as e:
+                    failures.append(f"{tag}: error {str(e)[:400]}")
     for f in failures:
         print("FAIL", f)
     print(f"{ok}/{total} cases byte-identical and cross-decodable")

@@ -1,9 +1,11 @@
 //! Decompositions turn data into integer bins (SZ3's `DecompositionInterface`).
 
+mod biomd;
 mod blockwise;
 mod interpolation;
 mod nopred;
 
+pub use biomd::{BioMdDecomposition, NUM_STREAMS as BIOMD_NUM_STREAMS};
 pub use blockwise::BlockwiseDecomposition;
 pub use interpolation::InterpolationDecomposition;
 pub use nopred::NoPredictionDecomposition;
@@ -26,6 +28,10 @@ pub trait Decomposition<T: SzFloat> {
     /// Bins lie in `[out_range().0, out_range().1)`.
     fn out_range(&self) -> (i32, i32);
     fn size_est(&self) -> usize;
+    /// The most bins a valid stream for `conf` holds; a stream claiming more is corrupt.
+    fn max_bins(&self, conf: &Config) -> usize {
+        conf.num
+    }
 }
 
 pub(crate) fn dims_array<const N: usize>(conf: &Config) -> Result<[usize; N]> {
