@@ -9,6 +9,8 @@ compressor for scientific data.
 * **Byte-compatible with SZ3 3.4.0.** Streams written by this port decode with C++ SZ3 and vice
   versa, and for the same input and settings the compressed bytes are identical (given the same
   zstd version). See [Verification](#verification).
+* **Fast.** Single-threaded, faster than C++ SZ3 overall on AMD Zen 4 and Intel Alder Lake
+  (1.06–1.10× compression, 1.15–1.18× decompression); see [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 * **Safe.** No `unsafe`; damaged or hostile streams return an error instead of panicking or
   allocating without bound.
 
