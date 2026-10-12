@@ -163,3 +163,24 @@ fn damaged_streams_do_not_panic() {
         }
     }
 }
+
+#[test]
+fn openmp_layout_round_trips() {
+    for dims in [&[5000usize][..], &[60, 70], &[17, 33, 40], &[3, 5]] {
+        let d: Vec<f32> = field(dims).iter().map(|&x| x as f32).collect();
+        for &a in ALGOS {
+            let mut conf = Config::new(dims);
+            conf.cmpr_algo = a;
+            conf.openmp = true;
+            conf.error_bound_mode = eb::REL;
+            conf.rel_error_bound = 1e-3;
+            let mut c = conf.clone();
+            let bytes = compress_with(&mut c, &d).unwrap();
+            let (back, out) = decompress::<f32>(&bytes).unwrap();
+            assert!(back.openmp);
+            for (x, y) in d.iter().zip(&out) {
+                assert!(((x - y).abs() as f64) <= c.abs_error_bound, "{dims:?} algo {a}");
+            }
+        }
+    }
+}

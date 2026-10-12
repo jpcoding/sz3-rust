@@ -7,8 +7,10 @@
 use crate::algo;
 use crate::bytes::{ByteWriter, Pod, Reader};
 use crate::config::{
-    Config, SZ3_DATA_VER, SZ3_DATA_VER_OLDEST, SZ3_MAGIC_NUMBER, SZ3_VERSION, algo as A, version_int, version_str,
+    ALGO_MAP, Config, SZ3_DATA_VER, SZ3_DATA_VER_OLDEST, SZ3_MAGIC_NUMBER, SZ3_VERSION, algo as A, enum_to_string,
+    version_int, version_str,
 };
+use crate::encoder::{HuffmanEncoder, HuffmanEncoderV1};
 use crate::error::{Error, Result, corrupt};
 use crate::lossless::{Lossless, Zstd};
 use crate::stats::cal_abs_error_bound;
@@ -48,7 +50,36 @@ fn to_bytes<F: Pod>(data: &[F]) -> Vec<u8> {
 
 /// Upper bound on the compressed size (`SZ_compress_size_bound`).
 pub fn compress_size_bound<T: SzData>(conf: &Config) -> usize {
-    4096 + conf.size_est() + Zstd::compress_bound(conf.num * T::FLOAT_SIZE)
+    if conf.openmp {
+        4096 + size_bound_omp(conf, T::FLOAT_SIZE)
+    } else {
+        4096 + conf.size_est() + Zstd::compress_bound(conf.num * T::FLOAT_SIZE)
+    }
+}
+
+/// Threads for `openmp = true`, as an OpenMP build picks them: `OMP_NUM_THREADS`, else one per
+/// core.
+pub fn num_threads() -> usize {
+    std::env::var("OMP_NUM_THREADS")
+        .ok()
+        .and_then(|v| v.split(',').next().and_then(|n| n.trim().parse::<usize>().ok()))
+        .filter(|&n| n > 0)
+        .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1))
+}
+
+/// The dimension the chunked layout splits, the chunk count, and (outer, extent, inner) sizes.
+fn omp_split(conf: &Config) -> (usize, usize, usize, usize) {
+    let split = (conf.cmpr_algo == A::BIOMD && conf.n == 3) as usize;
+    let ext = conf.dims[split];
+    let outer = if split == 1 { conf.dims[0] } else { 1 };
+    (split, outer, ext, conf.num / (outer * ext))
+}
+
+fn size_bound_omp(conf: &Config, float_size: usize) -> usize {
+    let (_, _, ext, _) = omp_split(conf);
+    let nt = num_threads().min(ext);
+    let chunk = ext.div_ceil(nt) * (conf.num / ext);
+    4 + nt * conf.size_est() + 2 * nt * 8 + nt * Zstd::compress_bound(chunk * float_size)
 }
 
 /// Compresses `data` (at least `conf.num` values, slowest dimension first) into an SZ3 stream.
@@ -73,8 +104,6 @@ pub fn compress_with<T: SzData>(conf: &mut Config, data: &[T]) -> Result<Vec<u8>
     let data = &data[..conf.num];
     let bound = compress_size_bound::<T>(conf);
     let cap = bound - 16 - conf.size_est() * 2;
-    // This port has no OpenMP; like a C++ build without it, the data is compressed as a whole.
-    conf.openmp = false;
 
     let mut out = Vec::with_capacity(bound / 2);
     out.put_u32(SZ3_MAGIC_NUMBER);
@@ -88,10 +117,10 @@ pub fn compress_with<T: SzData>(conf: &mut Config, data: &[T]) -> Result<Vec<u8>
 
 fn compress_impl<T: SzData>(conf: &mut Config, data: &[T], out: &mut Vec<u8>, cap: usize) -> Result<usize> {
     if let Some(f) = T::as_f32_slice(data) {
-        return dispatch_compress(conf, f, out, cap);
+        return compress_float(conf, f, out, cap);
     }
     if let Some(f) = T::as_f64_slice(data) {
-        return dispatch_compress(conf, f, out, cap);
+        return compress_float(conf, f, out, cap);
     }
     // Integers go through the float type that holds them, within floor(bound) + 0.49, so rounding
     // each decompressed value lands within the bound.
@@ -99,7 +128,7 @@ fn compress_impl<T: SzData>(conf: &mut Config, data: &[T], out: &mut Vec<u8>, ca
         let v: Vec<f32> = data.iter().map(|x| x.to_f64() as f32).collect();
         cal_abs_error_bound(conf, &v, None)?;
         conf.abs_error_bound = conf.abs_error_bound.floor() + 0.49;
-        dispatch_compress(conf, &v, out, cap)
+        compress_float(conf, &v, out, cap)
     } else {
         let v: Vec<f64> = data.iter().map(|x| x.to_f64()).collect();
         if T::SIZE == 8 && v.iter().any(|x| x.abs() >= 9007199254740992.0) {
@@ -109,8 +138,106 @@ fn compress_impl<T: SzData>(conf: &mut Config, data: &[T], out: &mut Vec<u8>, ca
         }
         cal_abs_error_bound(conf, &v, None)?;
         conf.abs_error_bound = conf.abs_error_bound.floor() + 0.49;
-        dispatch_compress(conf, &v, out, cap)
+        compress_float(conf, &v, out, cap)
     }
+}
+
+fn compress_float<F: SzFloat>(conf: &mut Config, data: &[F], out: &mut Vec<u8>, cap: usize) -> Result<usize> {
+    if conf.openmp {
+        compress_omp(conf, data, out, cap, num_threads())
+    } else {
+        dispatch_compress(conf, data, out, cap)
+    }
+}
+
+/// SZ3's OpenMP layout (`SZ_compress_OMP`): the data is split into `threads` chunks along the first
+/// dimension (the atoms for BioMD 3-D data), compressed in parallel; written as the chunk count
+/// (i32), each chunk's config, each chunk's size (u64), then the chunks.
+pub fn compress_omp<F: SzFloat>(
+    conf: &mut Config,
+    data: &[F],
+    out: &mut Vec<u8>,
+    cap: usize,
+    threads: usize,
+) -> Result<usize> {
+    let (split, outer, ext, inner) = omp_split(conf);
+    let nt = threads.max(1).min(ext);
+    if conf.error_bound_mode != crate::config::eb::ABS {
+        // Range from per-chunk extremes, as SZ3 computes it.
+        let mut lo_v = Vec::with_capacity(nt);
+        let mut hi_v = Vec::with_capacity(nt);
+        for i in 0..nt {
+            let chunk = &data[i * conf.num / nt..(i + 1) * conf.num / nt];
+            let (mut mn, mut mx) = (chunk[0], chunk[0]);
+            for &v in &chunk[1..] {
+                if v < mn {
+                    mn = v;
+                }
+                if !(v < mx) {
+                    mx = v;
+                }
+            }
+            lo_v.push(mn);
+            hi_v.push(mx);
+        }
+        let mx = hi_v.iter().copied().fold(hi_v[0], |a, b| if a < b { b } else { a });
+        let mn = lo_v.iter().copied().fold(lo_v[0], |a, b| if b < a { b } else { a });
+        cal_abs_error_bound(conf, data, Some(mx - mn))?;
+    }
+    let base = conf.clone();
+    let results: Vec<Result<(Config, Vec<u8>)>> = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..nt)
+            .map(|i| {
+                let base = &base;
+                s.spawn(move || -> Result<(Config, Vec<u8>)> {
+                    let lo = i * ext / nt;
+                    let hi = (i + 1) * ext / nt;
+                    let mut dims = base.dims.clone();
+                    dims[split] = hi - lo;
+                    let mut c = base.clone();
+                    c.set_dims(&dims);
+                    let cap = 8 + Zstd::compress_bound(c.num * F::SIZE);
+                    let gathered;
+                    let chunk: &[F] = if outer > 1 {
+                        let run = (hi - lo) * inner;
+                        gathered = (0..outer)
+                            .flat_map(|o| data[(o * ext + lo) * inner..][..run].iter().copied())
+                            .collect::<Vec<F>>();
+                        &gathered
+                    } else {
+                        &data[lo * inner..hi * inner]
+                    };
+                    let mut buf = Vec::new();
+                    dispatch_compress(&mut c, chunk, &mut buf, cap)?;
+                    Ok((c, buf))
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("compression thread panicked"))
+            .collect()
+    });
+    let chunks = results.into_iter().collect::<Result<Vec<_>>>()?;
+    let header: usize = 4 + nt * 8 + chunks.iter().map(|(c, _)| c.size_est()).sum::<usize>();
+    let total: usize = chunks.iter().map(|(_, b)| b.len()).sum();
+    if header + total > cap {
+        return Err(Error::InvalidArgument(
+            "The buffer for compressed data is not large enough.".into(),
+        ));
+    }
+    let start = out.len();
+    out.put_i32(nt as i32);
+    for (c, _) in &chunks {
+        c.save(out)?;
+    }
+    for (_, b) in &chunks {
+        out.put_u64(b.len() as u64);
+    }
+    for (_, b) in &chunks {
+        out.extend_from_slice(b);
+    }
+    Ok(out.len() - start)
 }
 
 /// `SZ_compress_dispatcher`: picks the algorithm, falls back to lossless when the bound is not
@@ -241,31 +368,43 @@ fn decompress_impl<F: SzFloat>(conf: &Config, payload: &[u8], out: &mut [F]) -> 
 
 /// `SZ_decompress_dispatcher`.
 pub fn dispatch_decompress<F: SzFloat>(conf: &Config, cmp: &[u8], out: &mut [F]) -> Result<()> {
-    if conf.sz3_data_ver < version_int("3.4.0") && conf.cmpr_algo != A::LOSSLESS {
-        return Err(Error::Unsupported(format!(
-            "algorithm {} of data version {} is not supported yet",
-            conf.cmpr_algo,
-            version_str(conf.sz3_data_ver)
-        )));
+    let n = conf.n as usize;
+    // Data version 3.3.2: its Huffman streams are HuffmanEncoderV1's.
+    if conf.sz3_data_ver < version_int("3.4.0") {
+        return match conf.cmpr_algo {
+            A::LORENZO_REG => {
+                with_n!(n, N => algo::decompress_lorenzo_reg::<F, N, HuffmanEncoderV1>(conf, cmp, out))
+            }
+            A::INTERP => with_n!(n, N => algo::decompress_interp::<F, N, HuffmanEncoderV1>(conf, cmp, out)),
+            A::LOSSLESS => decompress_lossless(conf, cmp, out),
+            a => Err(Error::InvalidArgument(format!(
+                "{} data of version {} is not supported; use SZ3 v{} to decompress it",
+                enum_to_string(a, ALGO_MAP),
+                version_str(conf.sz3_data_ver),
+                version_str(conf.sz3_data_ver)
+            ))),
+        };
     }
     let n = conf.n as usize;
     match conf.cmpr_algo {
-        A::LOSSLESS => {
-            let bytes = Zstd::default().decompress(cmp, conf.num * F::SIZE)?;
-            if bytes.len() != conf.num * F::SIZE {
-                return corrupt("Decompressed data size does not match the original data size");
-            }
-            for (o, c) in out.iter_mut().zip(bytes.chunks_exact(F::SIZE)) {
-                *o = F::read_le(c);
-            }
-            Ok(())
-        }
-        A::LORENZO_REG => with_n!(n, N => algo::decompress_lorenzo_reg::<F, N>(conf, cmp, out)),
-        A::INTERP => with_n!(n, N => algo::decompress_interp::<F, N>(conf, cmp, out)),
+        A::LOSSLESS => decompress_lossless(conf, cmp, out),
+        A::LORENZO_REG => with_n!(n, N => algo::decompress_lorenzo_reg::<F, N, HuffmanEncoder>(conf, cmp, out)),
+        A::INTERP => with_n!(n, N => algo::decompress_interp::<F, N, HuffmanEncoder>(conf, cmp, out)),
         A::NOPRED => algo::decompress_nopred::<F>(conf, cmp, out),
         A::BIOMD => Err(Error::Unsupported("ALGO_BIOMD is not ported yet".into())),
         _ => Err(Error::InvalidArgument("Unknown compression algorithm".into())),
     }
+}
+
+fn decompress_lossless<F: SzFloat>(conf: &Config, cmp: &[u8], out: &mut [F]) -> Result<()> {
+    let bytes = Zstd::default().decompress(cmp, conf.num * F::SIZE)?;
+    if bytes.len() != conf.num * F::SIZE {
+        return corrupt("Decompressed data size does not match the original data size");
+    }
+    for (o, c) in out.iter_mut().zip(bytes.chunks_exact(F::SIZE)) {
+        *o = F::read_le(c);
+    }
+    Ok(())
 }
 
 /// Reads the chunked layout SZ3 writes with OpenMP: a chunk count, each chunk's config, each

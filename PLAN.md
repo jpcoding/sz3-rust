@@ -30,19 +30,30 @@ Port of [SZ3](https://github.com/szcompressor/SZ3) (reference: v3.4.0, data form
 3. **Safe Rust.** No `unsafe` in the pipeline; every read of untrusted input is bounds checked
    and returns `Err`, never panics.
 
-## Phases
+## Order of work
 
-| Phase | Scope | Status |
-|-------|-------|--------|
-| 1 | Core: `Config` (binary + INI), byte utils, zstd lossless, canonical Huffman encoder, linear quantizer, error-bound modes | done |
-| 2 | Algorithms: `ALGO_NOPRED`, `ALGO_LORENZO_REG` (Lorenzo 1st/2nd order, regression, composed predictor, blockwise decomposition), `ALGO_INTERP`, `ALGO_INTERP_LORENZO` (sampling + auto-tuning), `ALGO_LOSSLESS`; f32/f64 and integer input | done |
-| 3 | `sz3` CLI with the same arguments as the C++ tool; `-a` statistics | done |
-| 4 | Cross-validation against C++ SZ3: Rust→C++ decode, C++→Rust decode, byte-identical compressed output, error-bound property tests | done (456/456 synthetic cases + SDRBench fields byte-identical) |
-| 5 | OpenMP-compatible chunked layout (`openmp = true`): reading done; multithreaded writing planned |
-| 6 | Read 3.3.2 streams (`HuffmanEncoderV1`) | planned |
-| 7 | `ALGO_BIOMD` (molecular dynamics), segmented encoder | planned |
-| 8 | C ABI (`sz3c.h` compatible) + Python bindings, HDF5 filter | planned |
-| 9 | Performance: currently 1.2-2x slower than C++; profile hot loops (Huffman decode, blockwise predict, interpolation), remove per-element dyn dispatch and bounds checks | next |
+1. **1:1 parity** with C++ SZ3 — every feature, format path and tool, verified byte-for-byte.
+2. **Performance** — then beat C++ on both AMD (Zen 4) and Intel (Alder Lake) machines, keeping
+   streams byte-identical.
+
+## Parity checklist
+
+| Area | Item | Status |
+|------|------|--------|
+| Core | Config (binary + INI), header, version checks | done |
+| Core | Huffman (3.4.0), linear quantizer, zstd/bypass lossless | done |
+| Algorithms | INTERP_LORENZO (tuning), INTERP, LORENZO_REG, NOPRED, LOSSLESS | done |
+| Algorithms | ALGO_BIOMD (SZBioMDDecomposition + SegmentedEncoder) | todo |
+| Data | f32/f64, 8/16/32/64-bit integers, 1–4 D, all error-bound modes | done |
+| Format | read OpenMP-chunked streams | done |
+| Format | write OpenMP-chunked streams (multithreaded compression) | todo |
+| Format | read 3.3.2 streams (HuffmanEncoderV1), golden streams from SZ3's test suite | todo |
+| Format | SZ3's official format digest (`data_format_digest.txt`, 3.4.0) | done |
+| Modules | BypassEncoder, TimeSeriesDecomposition, SZExaaltCompressor, k-means utils | todo |
+| Tools | `sz3` CLI | done |
+| Tools | C API (`sz3c.h`), Python bindings (pysz), HDF5 filter (H5Z-SZ3), `mdz` | todo |
+| Tests | port SZ3's module tests (tools/test/modules) | todo |
+| Verification | cross-check matrix + SDRBench real data, AMD and Intel | done (AMD), running (Intel) |
 
 ## Layout
 

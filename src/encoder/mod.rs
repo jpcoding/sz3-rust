@@ -1,8 +1,10 @@
 //! Entropy coding of quantization bins (SZ3's `EncoderInterface`).
 
 mod huffman;
+mod huffman_v1;
 
 pub use huffman::HuffmanEncoder;
+pub use huffman_v1::HuffmanEncoderV1;
 
 use crate::bytes::Reader;
 use crate::error::Result;

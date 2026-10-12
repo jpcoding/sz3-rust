@@ -131,9 +131,14 @@ pub fn compress_lorenzo_reg<T: SzFloat, const N: usize>(
     GenericCompressor::new(d, HuffmanEncoder::new(), Zstd::default()).compress(conf, data, out, cap)
 }
 
-pub fn decompress_lorenzo_reg<T: SzFloat, const N: usize>(conf: &Config, cmp: &[u8], out: &mut [T]) -> Result<()> {
-    let d = lorenzo_regression::<T, N, HuffmanEncoder>(conf, LinearQuantizer::default())?;
-    GenericCompressor::new(d, HuffmanEncoder::new(), Zstd::default()).decompress(conf, cmp, out)
+/// `E` is the Huffman coder of the stream's data version.
+pub fn decompress_lorenzo_reg<T: SzFloat, const N: usize, E: Encoder + Default + 'static>(
+    conf: &Config,
+    cmp: &[u8],
+    out: &mut [T],
+) -> Result<()> {
+    let d = lorenzo_regression::<T, N, E>(conf, LinearQuantizer::default())?;
+    GenericCompressor::new(d, E::default(), Zstd::default()).decompress(conf, cmp, out)
 }
 
 // ---------------------------------------------------------------- interpolation
@@ -154,9 +159,13 @@ pub fn compress_interp<T: SzFloat, const N: usize>(
     GenericCompressor::new(d, HuffmanEncoder::new(), Zstd::default()).compress(conf, data, out, cap)
 }
 
-pub fn decompress_interp<T: SzFloat, const N: usize>(conf: &Config, cmp: &[u8], out: &mut [T]) -> Result<()> {
+pub fn decompress_interp<T: SzFloat, const N: usize, E: Encoder + Default>(
+    conf: &Config,
+    cmp: &[u8],
+    out: &mut [T],
+) -> Result<()> {
     let d = InterpolationDecomposition::<T, N, _>::new(quantizer::<T>(conf));
-    GenericCompressor::new(d, HuffmanEncoder::new(), Zstd::default()).decompress(conf, cmp, out)
+    GenericCompressor::new(d, E::default(), Zstd::default()).decompress(conf, cmp, out)
 }
 
 /// Compression ratio of a decomposition over the sampled blocks, one decomposition reused for all

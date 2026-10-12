@@ -29,7 +29,13 @@ EXTRA_CFG = {
     "ALGO_LORENZO_REG/lonly": "Lorenzo = true\nLorenzo2ndOrder = false\nRegression = false\n",
     "ALGO_LORENZO_REG/ronly": "Lorenzo = false\nLorenzo2ndOrder = false\nRegression = true\n",
     "ALGO_INTERP/linear": "InterpolationAlgo = INTERP_ALGO_LINEAR\n",
+    # OpenMP layout: chunked along the first dimension, OMP_NUM_THREADS chunks
+    "ALGO_INTERP_LORENZO/omp": "[GlobalSettings]\nOpenMP = true\n",
+    "ALGO_LORENZO_REG/omp": "[GlobalSettings]\nOpenMP = true\n",
+    "ALGO_LOSSLESS/omp": "[GlobalSettings]\nOpenMP = true\n",
 }
+# Both tools pick the OpenMP chunk count from here; 3 gives uneven chunks.
+os.environ["OMP_NUM_THREADS"] = "3"
 
 
 def run(cmd):
@@ -57,7 +63,7 @@ def main():
         tag = f"{name}.{ty}.{(extra or algo).replace('/', '-')}.{'_'.join(bound[1:3])}"
         if only and only not in tag:
             continue
-        if extra and bound is not BOUNDS[0]:
+        if extra and not extra.endswith("/omp") and bound is not BOUNDS[0]:
             continue
         src = os.path.join(data, f"{name}.{ty}")
         cfg = os.path.join(work, f"{tag}.cfg")

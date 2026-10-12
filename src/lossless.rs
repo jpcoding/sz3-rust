@@ -35,15 +35,17 @@ impl Lossless for Zstd {
         if cap < 8 {
             return Err(Error::BufferTooSmall);
         }
-        // zstd writes from the start of a Vec, so the frame goes to its own buffer.
-        let mut frame: Vec<u8> = Vec::with_capacity(zstd_safe::compress_bound(src.len()));
-        match zstd_safe::compress(&mut frame, src, self.level) {
-            Ok(n) if n <= cap - 8 => {
+        // zstd gets exactly the capacity SZ3 gives it: with less than its bound it may give up
+        // where unbounded compression would just fit.
+        let frame_cap = (cap - 8).min(zstd_safe::compress_bound(src.len()));
+        let mut frame = vec![0u8; frame_cap];
+        match zstd_safe::compress(&mut frame[..], src, self.level) {
+            Ok(n) => {
                 out.put_u64(src.len() as u64);
-                out.extend_from_slice(&frame);
+                out.extend_from_slice(&frame[..n]);
                 Ok(n + 8)
             }
-            Ok(_) => Err(Error::BufferTooSmall),
+            Err(code) if zstd_safe::get_error_name(code).contains("too small") => Err(Error::BufferTooSmall),
             Err(code) => Err(Error::Lossless(zstd_safe::get_error_name(code).to_string())),
         }
     }
