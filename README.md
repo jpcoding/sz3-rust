@@ -85,3 +85,8 @@ different zstd versions the streams still cross-decode.
 ```sh
 python3 scripts/crosscheck.py /path/to/cpp/sz3 target/release/sz3 <data dir> <work dir>
 ```
+
+## Contributing
+
+Commits end with a `Co-Authored-By: Claude <noreply@anthropic.com>` trailer. Enable the template
+that adds it with `git config commit.template .gitmessage`.
