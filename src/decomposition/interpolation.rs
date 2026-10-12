@@ -50,9 +50,20 @@ trait Visit<T> {
     /// An anchor point, stored losslessly.
     fn anchor(&mut self, data: &mut [T], d: usize);
     /// An interpolated point and its prediction.
-    fn point(&mut self, data: &mut [T], d: usize, pred: T);
+    fn point(&mut self, x: &mut T, pred: T);
     /// The error bound of the next level.
     fn set_eb(&mut self, eb: f64);
+    /// The points `row[j]`, `j = start, start + step, ...` while `j + reach < row.len()`, each
+    /// predicted by `pred(row, j)` from values at most `reach` away.
+    #[inline(always)]
+    fn row<F: Fn(&[T], usize) -> T>(&mut self, row: &mut [T], start: usize, step: usize, reach: usize, pred: F) {
+        let mut j = start;
+        while j + reach < row.len() {
+            let p = pred(row, j);
+            self.point(&mut row[j], p);
+            j += step;
+        }
+    }
 }
 
 /// Calls `f` on `offset + sum(i_k * dim_offsets[k])` for `i_k` in `begins[k]..ends[k]` stepping
@@ -95,6 +106,53 @@ fn foreach<const N: usize>(
     }
 }
 
+/// As [`foreach`], one innermost row at a time: `f(first, count, step)` for the row's positions
+/// `first + k step`, `k < count`.
+#[inline(always)]
+fn foreach_rows<const N: usize>(
+    offset: usize,
+    begins: &[usize; N],
+    ends: &[usize; N],
+    strides: &[usize; N],
+    dim_offsets: &[usize; N],
+    mut f: impl FnMut(usize, usize, usize),
+) {
+    if (0..N).any(|k| begins[k] >= ends[k]) {
+        return;
+    }
+    let count = (ends[N - 1] - begins[N - 1]).div_ceil(strides[N - 1]);
+    let step = strides[N - 1] * dim_offsets[N - 1];
+    let mut idx = *begins;
+    loop {
+        let mut base = offset + begins[N - 1] * dim_offsets[N - 1];
+        for k in 0..N - 1 {
+            base += idx[k] * dim_offsets[k];
+        }
+        f(base, count, step);
+        let mut d = N - 1;
+        loop {
+            if d == 0 {
+                return;
+            }
+            d -= 1;
+            idx[d] += strides[d];
+            if idx[d] < ends[d] {
+                break;
+            }
+            idx[d] = begins[d];
+        }
+    }
+}
+
+/// The row `first + k step` (`k < count`) with `reach` values on either side, so a loop bounded by
+/// `j + reach < row.len()` needs no other bounds checks; `None` if it leaves `data`.
+#[inline(always)]
+fn row_window<T>(data: &mut [T], first: usize, count: usize, step: usize, reach: usize) -> Option<&mut [T]> {
+    let lo = first.checked_sub(reach)?;
+    let hi = first + (count - 1) * step + reach;
+    data.get_mut(lo..=hi)
+}
+
 impl<const N: usize> Grid<N> {
     /// Interpolates along one dimension, the original (ICDE'21) scheme.
     fn interpolation_1d<T: SzFloat, V: Visit<T>>(
@@ -113,12 +171,11 @@ impl<const N: usize> Grid<N> {
         let s3 = 3 * stride;
         let s5 = 5 * stride;
         if !cubic || n < 5 {
-            let mut i = 1;
-            while i + 1 < n {
-                let d = begin + i * stride;
-                let p = interp_linear(data[d - stride], data[d + stride]);
-                v.point(data, d, p);
-                i += 2;
+            // i = 1, 3, ... while i + 1 < n
+            if let Some(row) = data.get_mut(begin..=end) {
+                v.row(row, stride, 2 * stride, stride, |r, j| {
+                    interp_linear(r[j - stride], r[j + stride])
+                });
             }
             if n.is_multiple_of(2) {
                 let d = begin + (n - 1) * stride;
@@ -127,27 +184,30 @@ impl<const N: usize> Grid<N> {
                 } else {
                     interp_linear1(data[d - s3], data[d - stride])
                 };
-                v.point(data, d, p);
+                v.point(&mut data[d], p);
             }
         } else {
+            // i = 3, 5, ... while i + 3 < n
+            if let Some(row) = data.get_mut(begin..=end) {
+                v.row(row, s3, 2 * stride, s3, |r, j| {
+                    interp_cubic(r[j - s3], r[j - stride], r[j + stride], r[j + s3])
+                });
+            }
             let mut i = 3;
             while i + 3 < n {
-                let d = begin + i * stride;
-                let p = interp_cubic(data[d - s3], data[d - stride], data[d + stride], data[d + s3]);
-                v.point(data, d, p);
                 i += 2;
             }
             let d = begin + stride;
             let p = interp_quad_1(data[d - stride], data[d + stride], data[d + s3]);
-            v.point(data, d, p);
+            v.point(&mut data[d], p);
 
             let d = begin + i * stride;
             let p = interp_quad_2(data[d - s3], data[d - stride], data[d + stride]);
-            v.point(data, d, p);
+            v.point(&mut data[d], p);
             if n.is_multiple_of(2) {
                 let d = begin + (n - 1) * stride;
                 let p = interp_quad_3(data[d - s5], data[d - s3], data[d - stride]);
-                v.point(data, d, p);
+                v.point(&mut data[d], p);
             }
         }
     }
@@ -188,9 +248,13 @@ impl<const N: usize> Grid<N> {
             begins[direction] = 1;
             ends[direction] = n - 1;
             strides[direction] = 2;
-            foreach(offset, &begins, &ends, strides, &dim_offsets, |d| {
-                let p = interp_linear(data[d - stride], data[d + stride]);
-                v.point(data, d, p)
+            foreach_rows(offset, &begins, &ends, strides, &dim_offsets, |first, count, step| {
+                let Some(row) = row_window(data, first, count, step, stride) else {
+                    return;
+                };
+                v.row(row, stride, step, stride, |r, j| {
+                    interp_linear(r[j - stride], r[j + stride])
+                });
             });
             if n.is_multiple_of(2) {
                 begins[direction] = n - 1;
@@ -201,7 +265,7 @@ impl<const N: usize> Grid<N> {
                     } else {
                         interp_linear1(data[d - s2], data[d - stride])
                     };
-                    v.point(data, d, p)
+                    v.point(&mut data[d], p)
                 });
             }
         } else {
@@ -209,9 +273,13 @@ impl<const N: usize> Grid<N> {
             begins[direction] = 3;
             ends[direction] = n.saturating_sub(3);
             strides[direction] = 2;
-            foreach(offset, &begins, &ends, strides, &dim_offsets, |d| {
-                let p = interp_cubic(data[d - s3], data[d - stride], data[d + stride], data[d + s3]);
-                v.point(data, d, p)
+            foreach_rows(offset, &begins, &ends, strides, &dim_offsets, |first, count, step| {
+                let Some(row) = row_window(data, first, count, step, s3) else {
+                    return;
+                };
+                v.row(row, s3, step, s3, |r, j| {
+                    interp_cubic(r[j - s3], r[j - stride], r[j + stride], r[j + s3])
+                });
             });
             let mut boundaries = vec![1usize];
             if n % 2 == 1 && n > 3 {
@@ -242,7 +310,7 @@ impl<const N: usize> Grid<N> {
                     } else {
                         data[d - stride]
                     };
-                    v.point(data, d, p)
+                    v.point(&mut data[d], p)
                 });
             }
         }
@@ -479,7 +547,7 @@ impl<const N: usize> Walk<N> {
     fn run<T: SzFloat, V: Visit<T>>(&self, grid: &Grid<N>, data: &mut [T], eb: f64, v: &mut V) {
         let mut top = self.interp_level;
         if self.anchor_stride == 0 {
-            v.point(data, 0, T::ZERO);
+            v.point(&mut data[0], T::ZERO);
         } else {
             let begins = [0usize; N];
             let strides = [self.anchor_stride; N];
@@ -538,8 +606,8 @@ impl<T: SzFloat, Q: Quantizer<T>> Visit<T> for Compress<'_, Q> {
         self.k += 1;
     }
     #[inline(always)]
-    fn point(&mut self, data: &mut [T], d: usize, pred: T) {
-        self.bins[self.k] = self.q.quantize_and_overwrite(&mut data[d], pred);
+    fn point(&mut self, x: &mut T, pred: T) {
+        self.bins[self.k] = self.q.quantize_and_overwrite(x, pred);
         self.k += 1;
     }
     fn set_eb(&mut self, eb: f64) {
@@ -557,14 +625,31 @@ struct CompressLinear<'a, T> {
 
 impl<T: SzFloat> Visit<T> for CompressLinear<'_, T> {
     #[inline(always)]
+    fn row<F: Fn(&[T], usize) -> T>(&mut self, row: &mut [T], start: usize, step: usize, reach: usize, pred: F) {
+        // locals, so nothing is reloaded after each store to the row
+        let q = self.q;
+        let mut k = self.k;
+        let mut j = start;
+        while j + reach < row.len() {
+            let p = pred(row, j);
+            let b = q.quantize(&mut row[j], p, self.unpred);
+            if let Some(slot) = self.bins.get_mut(k) {
+                *slot = b;
+            }
+            k += 1;
+            j += step;
+        }
+        self.k = k;
+    }
+    #[inline(always)]
     fn anchor(&mut self, data: &mut [T], d: usize) {
         // stored losslessly with bin 0, which bins already holds
         self.unpred.push(data[d]);
         self.k += 1;
     }
     #[inline(always)]
-    fn point(&mut self, data: &mut [T], d: usize, pred: T) {
-        self.bins[self.k] = self.q.quantize(&mut data[d], pred, self.unpred);
+    fn point(&mut self, x: &mut T, pred: T) {
+        self.bins[self.k] = self.q.quantize(x, pred, self.unpred);
         self.k += 1;
     }
     fn set_eb(&mut self, eb: f64) {
@@ -591,10 +676,10 @@ impl<T: SzFloat, Q: Quantizer<T>> Visit<T> for Decompress<'_, Q> {
         self.k += 1;
     }
     #[inline(always)]
-    fn point(&mut self, data: &mut [T], d: usize, pred: T) {
+    fn point(&mut self, x: &mut T, pred: T) {
         let b = self.bins.get(self.k).copied().unwrap_or(0);
         match self.q.recover(pred, b) {
-            Ok(v) => data[d] = v,
+            Ok(v) => *x = v,
             Err(e) => self.err = Some(e),
         }
         self.k += 1;
@@ -616,6 +701,28 @@ struct DecompressLinear<'a, T> {
 
 impl<T: SzFloat> Visit<T> for DecompressLinear<'_, T> {
     #[inline(always)]
+    fn row<F: Fn(&[T], usize) -> T>(&mut self, row: &mut [T], start: usize, step: usize, reach: usize, pred: F) {
+        // locals, so nothing is reloaded after each store to the row
+        let q = self.q;
+        let bins = self.bins;
+        let unpred = self.unpred;
+        let mut index = *self.index;
+        let mut k = self.k;
+        let mut j = start;
+        while j + reach < row.len() {
+            let p = pred(row, j);
+            let b = bins.get(k).copied().unwrap_or(0);
+            match q.recover(p, b, unpred, &mut index) {
+                Ok(v) => row[j] = v,
+                Err(e) => self.err = Some(e),
+            }
+            k += 1;
+            j += step;
+        }
+        self.k = k;
+        *self.index = index;
+    }
+    #[inline(always)]
     fn anchor(&mut self, data: &mut [T], d: usize) {
         match self.unpred.get(*self.index) {
             Some(&v) => {
@@ -631,11 +738,11 @@ impl<T: SzFloat> Visit<T> for DecompressLinear<'_, T> {
         self.k += 1;
     }
     #[inline(always)]
-    fn point(&mut self, data: &mut [T], d: usize, pred: T) {
+    fn point(&mut self, x: &mut T, pred: T) {
         // decompress() checked there are as many bins as points
         let b = self.bins.get(self.k).copied().unwrap_or(0);
         match self.q.recover(pred, b, self.unpred, self.index) {
-            Ok(v) => data[d] = v,
+            Ok(v) => *x = v,
             Err(e) => self.err = Some(e),
         }
         self.k += 1;
