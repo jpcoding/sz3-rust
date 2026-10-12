@@ -1,9 +1,11 @@
 //! Entropy coding of quantization bins (SZ3's `EncoderInterface`).
 
+mod bypass;
 mod huffman;
 mod huffman_v1;
 mod segmented;
 
+pub use bypass::BypassEncoder;
 pub use huffman::HuffmanEncoder;
 pub use huffman_v1::HuffmanEncoderV1;
 pub use segmented::SegmentedEncoder;

@@ -30,6 +30,8 @@ pub trait SzFloat:
     /// `T(int)` for the small integer constants in the predictors.
     fn c(v: i32) -> Self;
     fn abs(self) -> Self;
+    /// `std::round`: half away from zero.
+    fn round(self) -> Self;
     fn is_finite(self) -> bool;
     /// `std::numeric_limits<T>::digits`.
     const DIGITS: i32;
@@ -64,6 +66,10 @@ impl SzFloat for f32 {
     #[inline(always)]
     fn abs(self) -> Self {
         f32::abs(self)
+    }
+    #[inline(always)]
+    fn round(self) -> Self {
+        f32::round(self)
     }
     #[inline(always)]
     fn is_finite(self) -> bool {
@@ -105,6 +111,10 @@ impl SzFloat for f64 {
     #[inline(always)]
     fn abs(self) -> Self {
         f64::abs(self)
+    }
+    #[inline(always)]
+    fn round(self) -> Self {
+        f64::round(self)
     }
     #[inline(always)]
     fn is_finite(self) -> bool {

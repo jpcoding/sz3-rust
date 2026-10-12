@@ -4,11 +4,13 @@ mod biomd;
 mod blockwise;
 mod interpolation;
 mod nopred;
+mod timeseries;
 
 pub use biomd::{BioMdDecomposition, NUM_STREAMS as BIOMD_NUM_STREAMS};
 pub use blockwise::BlockwiseDecomposition;
 pub use interpolation::InterpolationDecomposition;
 pub use nopred::NoPredictionDecomposition;
+pub use timeseries::TimeSeriesDecomposition;
 
 use crate::bytes::Reader;
 use crate::config::Config;

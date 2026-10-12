@@ -81,6 +81,20 @@ def main():
     nan = t.astype("<f4")
     nan[2, 10, 1] = np.nan
     nan.tofile(f"{out}/mdnan.f32")
+    # for mdz: a solid on a lattice (levels; with hops between sites), and a liquid
+    frames, atoms = 60, 3000
+    lat = np.stack(np.meshgrid(np.arange(15), np.arange(20), np.arange(10), indexing="ij"), -1).reshape(-1, 3)
+    lat = lat[:atoms] * 2.55 + 0.3
+    solid, pos = np.empty((frames, atoms, 3)), lat + rng.normal(0, 0.02, (atoms, 3))
+    for t in range(frames):
+        pos = lat + 0.7 * (pos - lat) + rng.normal(0, 0.02, (atoms, 3))
+        if t % 7 == 3:
+            lat[rng.integers(0, atoms, 5), 0] += 2.55
+        solid[t] = pos
+    solid.astype("<f4").tofile(f"{out}/solid.f32")
+    solid[:, :, 0].astype("<f4").tofile(f"{out}/solid2.f32")
+    liquid = np.cumsum(rng.normal(0, 0.01, (frames, atoms)), 0) + rng.uniform(0, 30, atoms)
+    liquid.astype("<f4").tofile(f"{out}/liquid2.f32")
 
 
 if __name__ == "__main__":

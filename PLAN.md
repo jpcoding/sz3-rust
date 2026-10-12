@@ -49,9 +49,10 @@ Port of [SZ3](https://github.com/szcompressor/SZ3) (reference: v3.4.0, data form
 | Format | write OpenMP-chunked streams (multithreaded compression) | done |
 | Format | read 3.3.2 streams (HuffmanEncoderV1), golden streams from SZ3's test suite | done |
 | Format | SZ3's official format digest (`data_format_digest.txt`, 3.4.0) | done |
-| Modules | BypassEncoder, TimeSeriesDecomposition, SZExaaltCompressor, k-means utils | todo |
+| Modules | BypassEncoder, TimeSeriesDecomposition, SZExaaltCompressor, k-means utils | done |
 | Tools | `sz3` CLI | done |
-| Tools | C API (`sz3c.h`), Python bindings (pysz), HDF5 filter (H5Z-SZ3), `mdz` | todo |
+| Tools | `mdz` (8/8 cases match C++: per-batch choice, ratio, max error) | done |
+| Tools | C API (`sz3c.h`), Python bindings (pysz), HDF5 filter (H5Z-SZ3) | todo |
 | Tests | port SZ3's module tests (tools/test/modules) | todo |
 | Verification | cross-check matrix (692 cases incl. OpenMP and BioMD) + SDRBench real data, AMD and Intel | done |
 

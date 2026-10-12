@@ -23,7 +23,8 @@ compressor for scientific data.
 | `ALGO_BIOMD` (molecular dynamics) | done |
 | OpenMP-chunked streams, read and write (multithreaded, `OMP_NUM_THREADS`) | done |
 | Reading 3.3.2 streams (`HuffmanEncoderV1`) | done |
-| C API, Python bindings, HDF5 filter, `mdz` | planned |
+| `mdz` tool, TimeSeries decomposition, Exaalt compressor, 1-D k-means | done |
+| C API, Python bindings, HDF5 filter | planned |
 
 See [PLAN.md](PLAN.md) for the roadmap.
 
