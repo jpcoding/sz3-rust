@@ -1,6 +1,6 @@
 use std::marker::PhantomData;
 
-use super::Predictor;
+use super::{Kernel, Predictor};
 use crate::blockwise::Block;
 use crate::bytes::{ByteWriter, Reader};
 use crate::encoder::{Encoder, HuffmanEncoder};
@@ -99,12 +99,11 @@ impl<T: SzFloat, const N: usize, E: Encoder + Default> Predictor<T, N> for Regre
 
     #[inline(always)]
     fn predict(&self, _: &[T], _: usize, idx: &[usize; N], _: &[usize; N]) -> T {
-        let c = &self.current_coeffs;
-        let mut p = c[0] * T::from_usize(idx[0]);
-        for i in 1..N {
-            p = p + c[i] * T::from_usize(idx[i]);
-        }
-        p + c[N]
+        regression_predict(&self.current_coeffs, idx)
+    }
+
+    fn kernel(&self) -> Kernel<T> {
+        Kernel::Regression(self.current_coeffs)
     }
 
     #[inline(always)]
@@ -156,4 +155,14 @@ impl<T: SzFloat, const N: usize, E: Encoder + Default> Predictor<T, N> for Regre
             + self.quantizer_liner.size_est()
             + HuffmanEncoder::size_bound(self.coeff_bins.len(), 65537)
     }
+}
+
+/// `c[0] i0 + c[1] i1 + ... + c[N]`, in `T`, in SZ3's order.
+#[inline(always)]
+pub fn regression_predict<T: SzFloat, const N: usize>(c: &[T; 5], idx: &[usize; N]) -> T {
+    let mut p = c[0] * T::from_usize(idx[0]);
+    for i in 1..N {
+        p = p + c[i] * T::from_usize(idx[i]);
+    }
+    p + c[N]
 }

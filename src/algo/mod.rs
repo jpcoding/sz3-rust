@@ -119,6 +119,9 @@ impl<T: SzFloat, const N: usize> Predictor<T, N> for BoxedPredictor<T, N> {
     fn size_est(&self) -> usize {
         self.0.size_est()
     }
+    fn kernel(&self) -> crate::predictor::Kernel<T> {
+        self.0.kernel()
+    }
 }
 
 pub fn compress_lorenzo_reg<T: SzFloat, const N: usize>(

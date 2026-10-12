@@ -5,7 +5,7 @@ use crate::blockwise::Padded;
 use crate::bytes::Reader;
 use crate::config::Config;
 use crate::error::{Result, corrupt};
-use crate::predictor::{LorenzoPredictor, Predictor};
+use crate::predictor::{Kernel, LorenzoPredictor, Predictor, lorenzo_predict, regression_predict};
 use crate::quantizer::Quantizer;
 use crate::types::SzFloat;
 
@@ -48,7 +48,8 @@ impl<T: SzFloat, const N: usize, P: Predictor<T, N>, Q: Quantizer<T>> Decomposit
         let dims = dims_array::<N>(conf)?;
         let mut padded = Padded::new(Some(&data[..conf.num]), dims, self.padding);
         let mut block = padded.block_iter(Self::block_size(conf)?);
-        let mut bins = Vec::with_capacity(conf.num);
+        let mut bins = vec![0i32; conf.num];
+        let mut k = 0usize;
         loop {
             let use_main = self.predictor.precompress(&block, &padded.buf);
             let p: &mut dyn Predictor<T, N> = if use_main {
@@ -59,11 +60,43 @@ impl<T: SzFloat, const N: usize, P: Predictor<T, N>, Q: Quantizer<T>> Decomposit
             p.precompress_block_commit();
             let p: &dyn Predictor<T, N> = p;
             let buf = &mut padded.buf;
-            let q = &mut self.quantizer;
-            block.for_each(|pos, idx| {
-                let pred = p.predict(buf, pos, idx, &block.strides);
-                bins.push(q.quantize_and_overwrite(&mut buf[pos], pred));
-            });
+            let ds = block.strides;
+            // A loop specialized to the block's predictor and a linear quantizer, else per-value calls.
+            let specialized = match (p.kernel(), self.quantizer.linear_kernel()) {
+                (Kernel::Lorenzo1, Some((q, unpred, _))) => {
+                    block.for_each(|pos, _| {
+                        let pred = lorenzo_predict::<T, N, 1>(buf, pos, &ds);
+                        bins[k] = q.quantize(&mut buf[pos], pred, unpred);
+                        k += 1;
+                    });
+                    true
+                }
+                (Kernel::Lorenzo2, Some((q, unpred, _))) => {
+                    block.for_each(|pos, _| {
+                        let pred = lorenzo_predict::<T, N, 2>(buf, pos, &ds);
+                        bins[k] = q.quantize(&mut buf[pos], pred, unpred);
+                        k += 1;
+                    });
+                    true
+                }
+                (Kernel::Regression(c), Some((q, unpred, _))) => {
+                    block.for_each(|pos, idx| {
+                        let pred = regression_predict::<T, N>(&c, idx);
+                        bins[k] = q.quantize(&mut buf[pos], pred, unpred);
+                        k += 1;
+                    });
+                    true
+                }
+                _ => false,
+            };
+            if !specialized {
+                let q = &mut self.quantizer;
+                block.for_each(|pos, idx| {
+                    let pred = p.predict(buf, pos, idx, &ds);
+                    bins[k] = q.quantize_and_overwrite(&mut buf[pos], pred);
+                    k += 1;
+                });
+            }
             if !block.advance() {
                 break;
             }
@@ -83,16 +116,55 @@ impl<T: SzFloat, const N: usize, P: Predictor<T, N>, Q: Quantizer<T>> Decomposit
             let use_main = self.predictor.predecompress(&block)?;
             let p: &dyn Predictor<T, N> = if use_main { &self.predictor } else { &self.fallback };
             let buf = &mut padded.buf;
-            let q = &mut self.quantizer;
+            let ds = block.strides;
             let mut err = Ok(());
-            block.for_each(|pos, idx| {
-                let pred = p.predict(buf, pos, idx, &block.strides);
-                match q.recover(pred, bins[k]) {
-                    Ok(v) => buf[pos] = v,
-                    Err(e) => err = Err(e),
+            let specialized = match (p.kernel(), self.quantizer.linear_kernel()) {
+                (Kernel::Lorenzo1, Some((q, unpred, ui))) => {
+                    block.for_each(|pos, _| {
+                        let pred = lorenzo_predict::<T, N, 1>(buf, pos, &ds);
+                        match q.recover(pred, bins[k], unpred, ui) {
+                            Ok(v) => buf[pos] = v,
+                            Err(e) => err = Err(e),
+                        }
+                        k += 1;
+                    });
+                    true
                 }
-                k += 1;
-            });
+                (Kernel::Lorenzo2, Some((q, unpred, ui))) => {
+                    block.for_each(|pos, _| {
+                        let pred = lorenzo_predict::<T, N, 2>(buf, pos, &ds);
+                        match q.recover(pred, bins[k], unpred, ui) {
+                            Ok(v) => buf[pos] = v,
+                            Err(e) => err = Err(e),
+                        }
+                        k += 1;
+                    });
+                    true
+                }
+                (Kernel::Regression(c), Some((q, unpred, ui))) => {
+                    block.for_each(|pos, idx| {
+                        let pred = regression_predict::<T, N>(&c, idx);
+                        match q.recover(pred, bins[k], unpred, ui) {
+                            Ok(v) => buf[pos] = v,
+                            Err(e) => err = Err(e),
+                        }
+                        k += 1;
+                    });
+                    true
+                }
+                _ => false,
+            };
+            if !specialized {
+                let q = &mut self.quantizer;
+                block.for_each(|pos, idx| {
+                    let pred = p.predict(buf, pos, idx, &ds);
+                    match q.recover(pred, bins[k]) {
+                        Ok(v) => buf[pos] = v,
+                        Err(e) => err = Err(e),
+                    }
+                    k += 1;
+                });
+            }
             err?;
             if !block.advance() {
                 break;

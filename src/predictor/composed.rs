@@ -114,6 +114,10 @@ impl<T: SzFloat, const N: usize, E: Encoder + Default> Predictor<T, N> for Compo
         Ok(())
     }
 
+    fn kernel(&self) -> super::Kernel<T> {
+        self.predictors[self.sid].kernel()
+    }
+
     fn padding(&self) -> usize {
         self.predictors.iter().map(|p| p.padding()).max().unwrap_or(0)
     }

@@ -8,8 +8,8 @@ use std::marker::PhantomData;
 use super::{Decomposition, dims_array};
 use crate::bytes::{ByteWriter, Reader};
 use crate::config::Config;
-use crate::error::{Result, corrupt};
-use crate::quantizer::Quantizer;
+use crate::error::{Error, Result, corrupt};
+use crate::quantizer::{LinearKernel, Quantizer};
 use crate::types::SzFloat;
 
 // Interpolation kernels, evaluated in the order and precision of SZ3's Interpolators.hpp.
@@ -45,6 +45,16 @@ struct Grid<const N: usize> {
     sequences: Vec<[usize; N]>,
 }
 
+/// Receives every point of an interpolation walk.
+trait Visit<T> {
+    /// An anchor point, stored losslessly.
+    fn anchor(&mut self, data: &mut [T], d: usize);
+    /// An interpolated point and its prediction.
+    fn point(&mut self, data: &mut [T], d: usize, pred: T);
+    /// The error bound of the next level.
+    fn set_eb(&mut self, eb: f64);
+}
+
 /// Calls `f` on `offset + sum(i_k * dim_offsets[k])` for `i_k` in `begins[k]..ends[k]` stepping
 /// `strides[k]`, row-major (SZ3's `foreach`).
 #[inline(always)]
@@ -54,10 +64,10 @@ fn foreach<const N: usize>(
     ends: &[usize; N],
     strides: &[usize; N],
     dim_offsets: &[usize; N],
-    mut f: impl FnMut(usize) -> Result<()>,
-) -> Result<()> {
+    mut f: impl FnMut(usize),
+) {
     if (0..N).any(|k| begins[k] >= ends[k]) {
-        return Ok(());
+        return;
     }
     let mut idx = *begins;
     loop {
@@ -67,13 +77,13 @@ fn foreach<const N: usize>(
         }
         let mut i = begins[N - 1];
         while i < ends[N - 1] {
-            f(base + i * dim_offsets[N - 1])?;
+            f(base + i * dim_offsets[N - 1]);
             i += strides[N - 1];
         }
         let mut d = N - 1;
         loop {
             if d == 0 {
-                return Ok(());
+                return;
             }
             d -= 1;
             idx[d] += strides[d];
@@ -87,18 +97,18 @@ fn foreach<const N: usize>(
 
 impl<const N: usize> Grid<N> {
     /// Interpolates along one dimension, the original (ICDE'21) scheme.
-    fn interpolation_1d<T: SzFloat, F: FnMut(&mut [T], usize, T) -> Result<()>>(
+    fn interpolation_1d<T: SzFloat, V: Visit<T>>(
         &self,
         data: &mut [T],
         begin: usize,
         end: usize,
         stride: usize,
         cubic: bool,
-        f: &mut F,
-    ) -> Result<()> {
+        v: &mut V,
+    ) {
         let n = (end - begin) / stride + 1;
         if n <= 1 {
-            return Ok(());
+            return;
         }
         let s3 = 3 * stride;
         let s5 = 5 * stride;
@@ -107,7 +117,7 @@ impl<const N: usize> Grid<N> {
             while i + 1 < n {
                 let d = begin + i * stride;
                 let p = interp_linear(data[d - stride], data[d + stride]);
-                f(data, d, p)?;
+                v.point(data, d, p);
                 i += 2;
             }
             if n.is_multiple_of(2) {
@@ -117,36 +127,35 @@ impl<const N: usize> Grid<N> {
                 } else {
                     interp_linear1(data[d - s3], data[d - stride])
                 };
-                f(data, d, p)?;
+                v.point(data, d, p);
             }
         } else {
             let mut i = 3;
             while i + 3 < n {
                 let d = begin + i * stride;
                 let p = interp_cubic(data[d - s3], data[d - stride], data[d + stride], data[d + s3]);
-                f(data, d, p)?;
+                v.point(data, d, p);
                 i += 2;
             }
             let d = begin + stride;
             let p = interp_quad_1(data[d - stride], data[d + stride], data[d + s3]);
-            f(data, d, p)?;
+            v.point(data, d, p);
 
             let d = begin + i * stride;
             let p = interp_quad_2(data[d - s3], data[d - stride], data[d + stride]);
-            f(data, d, p)?;
+            v.point(data, d, p);
             if n.is_multiple_of(2) {
                 let d = begin + (n - 1) * stride;
                 let p = interp_quad_3(data[d - s5], data[d - s3], data[d - stride]);
-                f(data, d, p)?;
+                v.point(data, d, p);
             }
         }
-        Ok(())
     }
 
     /// All interpolations along `direction` over a sub-grid, moving along the fastest
     /// dimension (SIGMOD'24).
     #[allow(clippy::too_many_arguments)]
-    fn interpolation_1d_fastest_dim_first<T: SzFloat, F: FnMut(&mut [T], usize, T) -> Result<()>>(
+    fn interpolation_1d_fastest_dim_first<T: SzFloat, V: Visit<T>>(
         &self,
         data: &mut [T],
         begin_idx: &[usize; N],
@@ -155,14 +164,14 @@ impl<const N: usize> Grid<N> {
         strides: &mut [usize; N],
         math_stride: usize,
         cubic: bool,
-        f: &mut F,
-    ) -> Result<()> {
+        v: &mut V,
+    ) {
         if (0..N).any(|i| end_idx[i] < begin_idx[i]) {
-            return Ok(());
+            return;
         }
         let n = (end_idx[direction] - begin_idx[direction]) / math_stride + 1;
         if n <= 1 {
-            return Ok(());
+            return;
         }
         let stride = math_stride * self.offsets[direction];
         let mut begins = [0usize; N];
@@ -181,8 +190,8 @@ impl<const N: usize> Grid<N> {
             strides[direction] = 2;
             foreach(offset, &begins, &ends, strides, &dim_offsets, |d| {
                 let p = interp_linear(data[d - stride], data[d + stride]);
-                f(data, d, p)
-            })?;
+                v.point(data, d, p)
+            });
             if n.is_multiple_of(2) {
                 begins[direction] = n - 1;
                 ends[direction] = n;
@@ -192,8 +201,8 @@ impl<const N: usize> Grid<N> {
                     } else {
                         interp_linear1(data[d - s2], data[d - stride])
                     };
-                    f(data, d, p)
-                })?;
+                    v.point(data, d, p)
+                });
             }
         } else {
             let s3 = 3 * stride;
@@ -202,8 +211,8 @@ impl<const N: usize> Grid<N> {
             strides[direction] = 2;
             foreach(offset, &begins, &ends, strides, &dim_offsets, |d| {
                 let p = interp_cubic(data[d - s3], data[d - stride], data[d + stride], data[d + s3]);
-                f(data, d, p)
-            })?;
+                v.point(data, d, p)
+            });
             let mut boundaries = vec![1usize];
             if n % 2 == 1 && n > 3 {
                 boundaries.push(n - 2);
@@ -233,27 +242,26 @@ impl<const N: usize> Grid<N> {
                     } else {
                         data[d - stride]
                     };
-                    f(data, d, p)
-                })?;
+                    v.point(data, d, p)
+                });
             }
         }
-        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn interpolation<T: SzFloat, F: FnMut(&mut [T], usize, T) -> Result<()>>(
+    fn interpolation<T: SzFloat, V: Visit<T>>(
         &self,
         data: &mut [T],
         begin: [usize; N],
         end: [usize; N],
         cubic: bool,
-        f: &mut F,
+        v: &mut V,
         direction: usize,
         stride: usize,
-    ) -> Result<()> {
+    ) {
         let off = &self.offsets;
         if N == 1 {
-            return self.interpolation_1d(data, begin[0], end[0], stride, cubic, f);
+            return self.interpolation_1d(data, begin[0], end[0], stride, cubic, v);
         }
         let dims = self.sequences[direction];
         let s2 = stride * 2;
@@ -268,8 +276,8 @@ impl<const N: usize> Grid<N> {
                     bo + (end[d0] - begin[d0]) * off[d0],
                     stride * off[d0],
                     cubic,
-                    f,
-                )?;
+                    v,
+                );
                 j += s2;
             }
             let mut i = if begin[d0] != 0 { begin[d0] + stride } else { 0 };
@@ -281,11 +289,11 @@ impl<const N: usize> Grid<N> {
                     bo + (end[d1] - begin[d1]) * off[d1],
                     stride * off[d1],
                     cubic,
-                    f,
-                )?;
+                    v,
+                );
                 i += stride;
             }
-            return Ok(());
+            return;
         }
         let mut strides = [0usize; N];
         let mut begin_idx = begin;
@@ -295,7 +303,7 @@ impl<const N: usize> Grid<N> {
             begin_idx[dims[i]] = if begin[dims[i]] != 0 { begin[dims[i]] + s2 } else { 0 };
             strides[dims[i]] = s2;
         }
-        self.interpolation_1d_fastest_dim_first(data, &begin_idx, &end_idx, dims[0], &mut strides, stride, cubic, f)?;
+        self.interpolation_1d_fastest_dim_first(data, &begin_idx, &end_idx, dims[0], &mut strides, stride, cubic, v);
         for i in 1..N {
             begin_idx[dims[i]] = begin[dims[i]];
             begin_idx[dims[i - 1]] = if begin[dims[i - 1]] != 0 {
@@ -312,10 +320,9 @@ impl<const N: usize> Grid<N> {
                 &mut strides,
                 stride,
                 cubic,
-                f,
-            )?;
+                v,
+            );
         }
-        Ok(())
     }
 }
 
@@ -425,6 +432,33 @@ impl<T: SzFloat, const N: usize, Q: Quantizer<T>> InterpolationDecomposition<T, 
         })
     }
 
+    fn walk_params(&self) -> Walk<N> {
+        Walk {
+            dims: self.dims,
+            anchor_stride: self.anchor_stride,
+            interp_level: self.interp_level,
+            cubic: self.interp_id == 1,
+            direction: self.direction_sequence_id as usize,
+            blocksize: self.blocksize as usize,
+            eb_alpha: self.eb_alpha,
+            eb_beta: self.eb_beta,
+        }
+    }
+}
+
+/// What a walk needs of the decomposition, so the quantizer can be borrowed separately.
+struct Walk<const N: usize> {
+    dims: [usize; N],
+    anchor_stride: usize,
+    interp_level: i32,
+    cubic: bool,
+    direction: usize,
+    blocksize: usize,
+    eb_alpha: f64,
+    eb_beta: f64,
+}
+
+impl<const N: usize> Walk<N> {
     /// Error bound for a level, or `None` to keep the current one.
     fn level_eb(&self, eb: f64, level: i32) -> Option<f64> {
         if self.eb_alpha < 0.0 {
@@ -441,40 +475,29 @@ impl<T: SzFloat, const N: usize, Q: Quantizer<T>> InterpolationDecomposition<T, 
         }
     }
 
-    /// Visits the anchor grid, then every level, calling `f` on each interpolated point.
-    fn walk(
-        &mut self,
-        grid: &Grid<N>,
-        data: &mut [T],
-        eb: f64,
-        anchor: &mut impl FnMut(&mut Q, &mut [T], usize) -> Result<()>,
-        point: &mut impl FnMut(&mut Q, &mut [T], usize, T) -> Result<()>,
-    ) -> Result<()> {
+    /// Visits the anchor grid, then every level from coarse to fine.
+    fn run<T: SzFloat, V: Visit<T>>(&self, grid: &Grid<N>, data: &mut [T], eb: f64, v: &mut V) {
+        let mut top = self.interp_level;
         if self.anchor_stride == 0 {
-            point(&mut self.quantizer, data, 0, T::ZERO)?;
+            v.point(data, 0, T::ZERO);
         } else {
             let begins = [0usize; N];
             let strides = [self.anchor_stride; N];
-            let q = &mut self.quantizer;
-            foreach(0, &begins, &grid.dims, &strides, &grid.offsets, |d| anchor(q, data, d))?;
-            self.interp_level -= 1;
+            foreach(0, &begins, &grid.dims, &strides, &grid.offsets, |d| v.anchor(data, d));
+            top -= 1;
         }
-        let cubic = self.interp_id == 1;
-        let direction = self.direction_sequence_id as usize;
-        let mut level = self.interp_level;
-        while level > 0 && level <= self.interp_level {
+        let mut level = top;
+        while level > 0 && level <= top {
             if let Some(e) = self.level_eb(eb, level) {
-                self.quantizer.set_eb(e);
+                v.set_eb(e);
             }
             let stride = 1usize << (level - 1);
-            let ibs = self.blocksize as usize * stride;
+            let ibs = self.blocksize * stride;
             let mut counts = [0usize; N];
             for i in 0..N {
                 counts[i] = (self.dims[i] - 1) / ibs + 1;
             }
             let mut k = [0usize; N];
-            let q = &mut self.quantizer;
-            let mut visit = |data: &mut [T], d: usize, p: T| point(q, data, d, p);
             'blocks: loop {
                 let mut start = [0usize; N];
                 let mut end = [0usize; N];
@@ -482,7 +505,7 @@ impl<T: SzFloat, const N: usize, Q: Quantizer<T>> InterpolationDecomposition<T, 
                     start[i] = k[i] * ibs;
                     end[i] = (start[i] + ibs).min(self.dims[i] - 1);
                 }
-                grid.interpolation(data, start, end, cubic, &mut visit, direction, stride)?;
+                grid.interpolation(data, start, end, self.cubic, v, self.direction, stride);
                 let mut d = N;
                 loop {
                     if d == 0 {
@@ -498,7 +521,128 @@ impl<T: SzFloat, const N: usize, Q: Quantizer<T>> InterpolationDecomposition<T, 
             }
             level -= 1;
         }
-        Ok(())
+    }
+}
+
+/// Compression through any quantizer.
+struct Compress<'a, Q> {
+    q: &'a mut Q,
+    bins: &'a mut [i32],
+    k: usize,
+}
+
+impl<T: SzFloat, Q: Quantizer<T>> Visit<T> for Compress<'_, Q> {
+    #[inline(always)]
+    fn anchor(&mut self, data: &mut [T], d: usize) {
+        self.bins[self.k] = self.q.force_save_unpred(data[d]);
+        self.k += 1;
+    }
+    #[inline(always)]
+    fn point(&mut self, data: &mut [T], d: usize, pred: T) {
+        self.bins[self.k] = self.q.quantize_and_overwrite(&mut data[d], pred);
+        self.k += 1;
+    }
+    fn set_eb(&mut self, eb: f64) {
+        self.q.set_eb(eb);
+    }
+}
+
+/// Compression through a linear quantizer's arithmetic, held by value.
+struct CompressLinear<'a, T> {
+    q: LinearKernel,
+    unpred: &'a mut Vec<T>,
+    bins: &'a mut [i32],
+    k: usize,
+}
+
+impl<T: SzFloat> Visit<T> for CompressLinear<'_, T> {
+    #[inline(always)]
+    fn anchor(&mut self, data: &mut [T], d: usize) {
+        // stored losslessly with bin 0, which bins already holds
+        self.unpred.push(data[d]);
+        self.k += 1;
+    }
+    #[inline(always)]
+    fn point(&mut self, data: &mut [T], d: usize, pred: T) {
+        self.bins[self.k] = self.q.quantize(&mut data[d], pred, self.unpred);
+        self.k += 1;
+    }
+    fn set_eb(&mut self, eb: f64) {
+        self.q.error_bound = eb;
+        self.q.error_bound_reciprocal = 1.0 / eb;
+    }
+}
+
+/// Decompression through any quantizer; the first error is kept.
+struct Decompress<'a, Q> {
+    q: &'a mut Q,
+    bins: &'a [i32],
+    k: usize,
+    err: Option<Error>,
+}
+
+impl<T: SzFloat, Q: Quantizer<T>> Visit<T> for Decompress<'_, Q> {
+    #[inline(always)]
+    fn anchor(&mut self, data: &mut [T], d: usize) {
+        match self.q.recover_unpred() {
+            Ok(v) => data[d] = v,
+            Err(e) => self.err = Some(e),
+        }
+        self.k += 1;
+    }
+    #[inline(always)]
+    fn point(&mut self, data: &mut [T], d: usize, pred: T) {
+        let b = self.bins.get(self.k).copied().unwrap_or(0);
+        match self.q.recover(pred, b) {
+            Ok(v) => data[d] = v,
+            Err(e) => self.err = Some(e),
+        }
+        self.k += 1;
+    }
+    fn set_eb(&mut self, eb: f64) {
+        self.q.set_eb(eb);
+    }
+}
+
+/// Decompression through a linear quantizer's arithmetic, held by value.
+struct DecompressLinear<'a, T> {
+    q: LinearKernel,
+    unpred: &'a [T],
+    index: &'a mut usize,
+    bins: &'a [i32],
+    k: usize,
+    err: Option<Error>,
+}
+
+impl<T: SzFloat> Visit<T> for DecompressLinear<'_, T> {
+    #[inline(always)]
+    fn anchor(&mut self, data: &mut [T], d: usize) {
+        match self.unpred.get(*self.index) {
+            Some(&v) => {
+                data[d] = v;
+                *self.index += 1;
+            }
+            None => {
+                self.err = Some(Error::Corrupt(
+                    "ran out of unpredictable values while decompressing".into(),
+                ))
+            }
+        }
+        self.k += 1;
+    }
+    #[inline(always)]
+    fn point(&mut self, data: &mut [T], d: usize, pred: T) {
+        // decompress() checked there are as many bins as points
+        let b = self.bins.get(self.k).copied().unwrap_or(0);
+        match self.q.recover(pred, b, self.unpred, self.index) {
+            Ok(v) => data[d] = v,
+            Err(e) => self.err = Some(e),
+        }
+        self.k += 1;
+    }
+    fn set_eb(&mut self, eb: f64) {
+        self.q.error_bound = eb;
+        self.q.error_bound_reciprocal = 1.0 / eb;
     }
 }
 
@@ -512,22 +656,33 @@ impl<T: SzFloat, const N: usize, Q: Quantizer<T>> Decomposition<T> for Interpola
         self.eb_alpha = conf.interp_alpha;
         self.eb_beta = conf.interp_beta;
         let grid = self.init()?;
+        let walk = self.walk_params();
         let mut bins = vec![0i32; self.num_elements];
         let eb = self.quantizer.eb();
-        // Anchors are stored losslessly and keep bin 0, so only the index advances for them.
-        let idx = std::cell::Cell::new(0usize);
-        let mut anchor = |q: &mut Q, data: &mut [T], d: usize| {
-            q.force_save_unpred(data[d]);
-            idx.set(idx.get() + 1);
-            Ok(())
-        };
-        let mut point = |q: &mut Q, data: &mut [T], d: usize, p: T| {
-            let i = idx.get();
-            bins[i] = q.quantize_and_overwrite(&mut data[d], p);
-            idx.set(i + 1);
-            Ok(())
-        };
-        self.walk(&grid, &mut data[..conf.num], eb, &mut anchor, &mut point)?;
+        let data = &mut data[..conf.num];
+        match self.quantizer.linear_kernel() {
+            Some((q, unpred, _)) => walk.run(
+                &grid,
+                data,
+                eb,
+                &mut CompressLinear {
+                    q,
+                    unpred,
+                    bins: &mut bins,
+                    k: 0,
+                },
+            ),
+            None => walk.run(
+                &grid,
+                data,
+                eb,
+                &mut Compress {
+                    q: &mut self.quantizer,
+                    bins: &mut bins,
+                    k: 0,
+                },
+            ),
+        }
         self.quantizer.set_eb(eb);
         Ok(bins)
     }
@@ -541,23 +696,37 @@ impl<T: SzFloat, const N: usize, Q: Quantizer<T>> Decomposition<T> for Interpola
         if bins.len() < self.num_elements {
             return corrupt("interpolation: fewer bins than the grid consumes");
         }
+        let walk = self.walk_params();
         let eb = self.quantizer.eb();
-        let idx = std::cell::Cell::new(0usize);
-        let mut anchor = |q: &mut Q, data: &mut [T], d: usize| {
-            data[d] = q.recover_unpred()?;
-            idx.set(idx.get() + 1);
-            Ok(())
+        let out = &mut out[..conf.num];
+        let err = match self.quantizer.linear_kernel() {
+            Some((q, unpred, index)) => {
+                let mut v = DecompressLinear {
+                    q,
+                    unpred,
+                    index,
+                    bins,
+                    k: 0,
+                    err: None,
+                };
+                walk.run(&grid, out, eb, &mut v);
+                v.err
+            }
+            None => {
+                let mut v = Decompress {
+                    q: &mut self.quantizer,
+                    bins,
+                    k: 0,
+                    err: None,
+                };
+                walk.run(&grid, out, eb, &mut v);
+                v.err
+            }
         };
-        let mut point = |q: &mut Q, data: &mut [T], d: usize, p: T| {
-            let i = idx.get();
-            let Some(&b) = bins.get(i) else {
-                return corrupt("interpolation: ran out of bins");
-            };
-            data[d] = q.recover(p, b)?;
-            idx.set(i + 1);
-            Ok(())
-        };
-        self.walk(&grid, &mut out[..conf.num], eb, &mut anchor, &mut point)
+        match err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     }
 
     fn save(&mut self, out: &mut Vec<u8>) -> Result<()> {

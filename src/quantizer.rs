@@ -23,6 +23,66 @@ pub trait Quantizer<T: SzFloat> {
     fn save(&self, out: &mut Vec<u8>);
     fn load(&mut self, r: &mut Reader) -> Result<()>;
     fn size_est(&self) -> usize;
+    /// For a linear quantizer: its parameters, unpredictable values and read position, for
+    /// specialized loops.
+    fn linear_kernel(&mut self) -> Option<(LinearKernel, &mut Vec<T>, &mut usize)> {
+        None
+    }
+}
+
+/// The arithmetic of [`LinearQuantizer`] with its parameters held by value.
+#[derive(Clone, Copy, Debug)]
+pub struct LinearKernel {
+    pub error_bound: f64,
+    pub error_bound_reciprocal: f64,
+    pub radius: i32,
+}
+
+impl LinearKernel {
+    #[inline(always)]
+    pub fn recover_pred<T: SzFloat>(&self, pred: T, bin: i32) -> T {
+        // In C++: pred + 2 * int64(bin - radius) * double(eb), in double, rounded to T.
+        let delta = (2 * (bin as i64 - self.radius as i64)) as f64 * self.error_bound;
+        T::from_f64(pred.to_f64() + delta)
+    }
+
+    /// Quantizes `data - pred`; `data` becomes the reconstructed value, or is stored in `unpred`
+    /// and gets bin 0.
+    #[inline(always)]
+    pub fn quantize<T: SzFloat>(&self, data: &mut T, pred: T, unpred: &mut Vec<T>) -> i32 {
+        let diff = *data - pred;
+        // NaN fails the comparison and infinities exceed it: both are stored losslessly.
+        let scaled = diff.abs().to_f64() * self.error_bound_reciprocal;
+        if scaled < (self.radius as i64 * 2 - 1) as f64 {
+            let half = ((scaled as i64 + 1) >> 1) as i32;
+            let bin = if diff < T::ZERO {
+                self.radius - half
+            } else {
+                self.radius + half
+            };
+            let dec = self.recover_pred(pred, bin);
+            if (dec.to_f64() - data.to_f64()).abs() <= self.error_bound {
+                *data = dec;
+                return bin;
+            }
+        }
+        unpred.push(*data);
+        0
+    }
+
+    #[inline(always)]
+    pub fn recover<T: SzFloat>(&self, pred: T, bin: i32, unpred: &[T], index: &mut usize) -> Result<T> {
+        if bin != 0 {
+            return Ok(self.recover_pred(pred, bin));
+        }
+        match unpred.get(*index) {
+            Some(&v) => {
+                *index += 1;
+                Ok(v)
+            }
+            None => corrupt("ran out of unpredictable values while decompressing"),
+        }
+    }
 }
 
 /// Uniform quantizer with `2 * radius` bins of width `2 * eb` (`LinearQuantizer`).
@@ -61,10 +121,12 @@ impl<T: SzFloat> LinearQuantizer<T> {
     }
 
     #[inline(always)]
-    fn recover_pred(&self, pred: T, bin: i32) -> T {
-        // In C++: pred + 2 * int64(bin - radius) * double(eb), in double, rounded to T.
-        let delta = (2 * (bin as i64 - self.radius as i64)) as f64 * self.error_bound;
-        T::from_f64(pred.to_f64() + delta)
+    fn kernel(&self) -> LinearKernel {
+        LinearKernel {
+            error_bound: self.error_bound,
+            error_bound_reciprocal: self.error_bound_reciprocal,
+            radius: self.radius,
+        }
     }
 
     pub fn unpred_count(&self) -> usize {
@@ -75,33 +137,12 @@ impl<T: SzFloat> LinearQuantizer<T> {
 impl<T: SzFloat> Quantizer<T> for LinearQuantizer<T> {
     #[inline(always)]
     fn quantize_and_overwrite(&mut self, data: &mut T, pred: T) -> i32 {
-        let diff = *data - pred;
-        // NaN fails the comparison and infinities exceed it: both are stored losslessly.
-        let scaled = diff.abs().to_f64() * self.error_bound_reciprocal;
-        if scaled < (self.radius as i64 * 2 - 1) as f64 {
-            let half = ((scaled as i64 + 1) >> 1) as i32;
-            let bin = if diff < T::ZERO {
-                self.radius - half
-            } else {
-                self.radius + half
-            };
-            let dec = self.recover_pred(pred, bin);
-            if (dec.to_f64() - data.to_f64()).abs() <= self.error_bound {
-                *data = dec;
-                return bin;
-            }
-        }
-        self.unpred.push(*data);
-        0
+        self.kernel().quantize(data, pred, &mut self.unpred)
     }
 
     #[inline(always)]
     fn recover(&mut self, pred: T, bin: i32) -> Result<T> {
-        if bin != 0 {
-            Ok(self.recover_pred(pred, bin))
-        } else {
-            self.recover_unpred()
-        }
+        self.kernel().recover(pred, bin, &self.unpred, &mut self.index)
     }
 
     fn force_save_unpred(&mut self, v: T) -> i32 {
@@ -156,6 +197,10 @@ impl<T: SzFloat> Quantizer<T> for LinearQuantizer<T> {
 
     fn size_est(&self) -> usize {
         1 + 8 + 4 + 8 + self.unpred.len() * T::SIZE
+    }
+
+    fn linear_kernel(&mut self) -> Option<(LinearKernel, &mut Vec<T>, &mut usize)> {
+        Some((self.kernel(), &mut self.unpred, &mut self.index))
     }
 }
 
