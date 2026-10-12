@@ -45,7 +45,7 @@ pub mod quantizer;
 pub mod stats;
 pub mod types;
 
-pub use api::{compress, compress_size_bound, compress_with, decompress};
+pub use api::{compress, compress_size_bound, compress_with, compress_with_capacity, decompress};
 pub use config::Config;
 pub use error::{Error, Result};
 pub use types::{SzData, SzFloat};

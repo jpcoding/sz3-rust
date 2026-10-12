@@ -108,3 +108,8 @@ cc -Icapi/include prog.c -Ltarget/release -lSZ3c
 
 `python/` builds the `pysz` module (PyO3, maturin) with the API of SZ3's pysz; pysz's own tests
 pass against it. See [python/README.md](python/README.md).
+
+## HDF5 filter
+
+`h5z/` builds `libhdf5sz3.so`, the SZ3 HDF5 filter plugin (id 32024), compatible with SZ3's
+H5Z-SZ3 in both directions. See [h5z/README.md](h5z/README.md).

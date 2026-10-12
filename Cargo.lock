@@ -152,6 +152,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "sz3-h5z"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "sz3",
+]
+
+[[package]]
 name = "typenum"
 version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

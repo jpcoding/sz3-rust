@@ -13,6 +13,6 @@ debug = "line-tables-only"
 sha2 = "0.11.0"
 
 [workspace]
-members = [".", "capi"]
+members = [".", "capi", "h5z"]
 # built with maturin, against a Python interpreter
 exclude = ["python"]

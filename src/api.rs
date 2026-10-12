@@ -91,6 +91,14 @@ pub fn compress<T: SzData>(conf: &Config, data: &[T]) -> Result<Vec<u8>> {
 /// As [`compress`], leaving in `conf` the configuration that was stored (absolute error bound,
 /// chosen algorithm and settings).
 pub fn compress_with<T: SzData>(conf: &mut Config, data: &[T]) -> Result<Vec<u8>> {
+    let bound = compress_size_bound::<T>(conf);
+    compress_with_capacity(conf, data, bound)
+}
+
+/// As [`compress_with`] into at most `capacity` bytes, which must be at least
+/// [`compress_size_bound`] (`SZ_compress(conf, data, buf, capacity)`). The capacity steers the
+/// fallback to lossless compression, so passing what a C++ caller passes gives the same bytes.
+pub fn compress_with_capacity<T: SzData>(conf: &mut Config, data: &[T], capacity: usize) -> Result<Vec<u8>> {
     if conf.n == 0 || conf.dims.is_empty() {
         return Err(Error::InvalidArgument("the configuration has no dimensions".into()));
     }
@@ -103,7 +111,10 @@ pub fn compress_with<T: SzData>(conf: &mut Config, data: &[T]) -> Result<Vec<u8>
     }
     let data = &data[..conf.num];
     let bound = compress_size_bound::<T>(conf);
-    let cap = bound - 16 - conf.size_est() * 2;
+    if capacity < bound {
+        return Err(Error::BufferTooSmall);
+    }
+    let cap = capacity - 16 - conf.size_est() * 2;
 
     let mut out = Vec::with_capacity(bound / 2);
     out.put_u32(SZ3_MAGIC_NUMBER);
@@ -342,7 +353,9 @@ pub fn stream_config(cmp: &[u8]) -> Result<Config> {
     }
     let mut r = Reader::new(cmp);
     if r.u32()? != SZ3_MAGIC_NUMBER {
-        return Err(Error::InvalidArgument("magic number mismatch, the input data is not compressed by SZ3".into()));
+        return Err(Error::InvalidArgument(
+            "magic number mismatch, the input data is not compressed by SZ3".into(),
+        ));
     }
     let ver = r.u32()?;
     let size = r.u64()?;
@@ -350,7 +363,10 @@ pub fn stream_config(cmp: &[u8]) -> Result<Config> {
         return corrupt("compressed payload size exceeds the buffer");
     }
     r.skip(size as usize)?;
-    let mut conf = Config { sz3_data_ver: ver, ..Config::default() };
+    let mut conf = Config {
+        sz3_data_ver: ver,
+        ..Config::default()
+    };
     conf.load(&mut r)?;
     Ok(conf)
 }
