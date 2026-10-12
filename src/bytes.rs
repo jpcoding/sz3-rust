@@ -39,9 +39,10 @@ impl ByteWriter for Vec<u8> {
         v.write_le(self);
     }
     fn put_slice<T: Pod>(&mut self, v: &[T]) {
-        self.reserve(v.len() * T::SIZE);
-        for &x in v {
-            x.write_le(self);
+        let start = self.len();
+        self.resize(start + v.len() * T::SIZE, 0);
+        for (c, &x) in self[start..].chunks_exact_mut(T::SIZE).zip(v) {
+            x.put_le(c);
         }
     }
 }
@@ -50,6 +51,8 @@ impl ByteWriter for Vec<u8> {
 pub trait Pod: Copy + Default + Send + Sync + 'static {
     const SIZE: usize;
     fn write_le(self, out: &mut Vec<u8>);
+    /// Writes into the first `SIZE` bytes of `out`.
+    fn put_le(self, out: &mut [u8]);
     fn read_le(b: &[u8]) -> Self;
 }
 
@@ -60,6 +63,10 @@ macro_rules! impl_pod {
             #[inline]
             fn write_le(self, out: &mut Vec<u8>) {
                 out.extend_from_slice(&self.to_le_bytes());
+            }
+            #[inline]
+            fn put_le(self, out: &mut [u8]) {
+                out[..Self::SIZE].copy_from_slice(&self.to_le_bytes());
             }
             #[inline]
             fn read_le(b: &[u8]) -> Self {

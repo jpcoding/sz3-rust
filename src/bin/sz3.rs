@@ -3,6 +3,7 @@
 use std::process::ExitCode;
 use std::time::Instant;
 
+use sz3::bytes::ByteWriter;
 use sz3::config::{EB_MAP, SZ3_DATA_VER, SZ3_VERSION, eb, fmt_g_prec, match_enum};
 use sz3::{Config, SzData, compress_with, decompress, stats};
 
@@ -244,10 +245,8 @@ fn read_values<T: SzData>(path: &str) -> Result<Vec<T>, String> {
 
 fn write_values<T: SzData + std::fmt::Display>(path: &str, v: &[T], binary: bool) -> Result<(), String> {
     let bytes = if binary {
-        let mut b = Vec::with_capacity(v.len() * T::SIZE);
-        for &x in v {
-            x.write_le(&mut b);
-        }
+        let mut b = Vec::new();
+        b.put_slice(v);
         b
     } else {
         let mut s = String::new();

@@ -144,15 +144,14 @@ pub fn dispatch_compress<F: SzFloat>(conf: &mut Config, data: &[F], out: &mut Ve
             Err(e) => return Err(e),
         }
     }
-    let raw = to_bytes(data);
     let Some(size) = lossy else {
         conf.cmpr_algo = A::LOSSLESS;
-        return Zstd::default().compress(&raw, out, cap);
+        return Zstd::default().compress(&to_bytes(data), out, cap);
     };
     // A lossy ratio under 3: keep lossless if it is smaller.
     if (conf.num * F::SIZE) as f64 / size as f64 / 1.0 < 3.0 {
         let mut z = Vec::new();
-        if let Ok(zs) = Zstd::default().compress(&raw, &mut z, size)
+        if let Ok(zs) = Zstd::default().compress(&to_bytes(data), &mut z, size)
             && zs < size
         {
             conf.cmpr_algo = A::LOSSLESS;

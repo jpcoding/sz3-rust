@@ -359,6 +359,82 @@ impl HuffmanEncoder {
     }
 }
 
+impl HuffmanEncoder {
+    /// Decodes `out.len()` symbols from `p`; returns the bits consumed.
+    ///
+    /// While 8 bytes remain, one big-endian load feeds several symbols. With `ZERO_RUNS` (a
+    /// one-bit code exists), a byte of zeros is a run of that code's symbol, and a byte of ones a
+    /// run of the second one-bit symbol when there are two; such runs are filled in bulk.
+    fn decode_payload<const ZERO_RUNS: bool>(&self, p: &[u8], out: &mut [i32]) -> Result<u64> {
+        let n = out.len();
+        let nbytes = p.len();
+        let tb = self.table_bits;
+        let ml = self.max_len;
+        let table = &self.table[..];
+        let zero_sym = self.sorted[0];
+        let one_runs = self.count[1] == 2;
+        let one_sym = if one_runs { self.sorted[1] } else { 0 };
+        let mut pos: u64 = 0;
+        let mut i = 0usize;
+        while i < n && (pos >> 3) as usize + 8 <= nbytes {
+            let byte = (pos >> 3) as usize;
+            let mut acc = u64::from_be_bytes(p[byte..byte + 8].try_into().unwrap()) << (pos & 7);
+            let mut avail = 64 - (pos & 7) as u32;
+            loop {
+                let len;
+                let top = acc >> 56;
+                if ZERO_RUNS && (top == 0 || (one_runs && top == 0xff)) {
+                    let ones = top != 0;
+                    let w = if ones { !acc } else { acc };
+                    let run = (w.leading_zeros()).min(avail) as usize;
+                    let run = run.min(n - i);
+                    out[i..i + run].fill(if ones { one_sym } else { zero_sym });
+                    len = run as u32;
+                    acc = if len < 64 { acc << len } else { 0 };
+                    i += run;
+                } else {
+                    let e = table[(acc >> (64 - tb)) as usize];
+                    if e.len != 0 {
+                        out[i] = e.sym;
+                        len = e.len as u32;
+                    } else {
+                        let (s, l) = self.decode_long(acc)?;
+                        out[i] = s;
+                        len = l;
+                    }
+                    acc <<= len;
+                    i += 1;
+                }
+                avail -= len;
+                pos += len as u64;
+                if avail < ml || i >= n {
+                    break;
+                }
+            }
+        }
+        while i < n {
+            let byte = (pos >> 3) as usize;
+            if byte >= nbytes {
+                return corrupt("Huffman: payload length does not match its codes");
+            }
+            let mut tail = [0u8; 8];
+            let k = (nbytes - byte).min(8);
+            tail[..k].copy_from_slice(&p[byte..byte + k]);
+            let acc = u64::from_be_bytes(tail) << (pos & 7);
+            let e = table[(acc >> (64 - tb)) as usize];
+            let (s, l) = if e.len != 0 {
+                (e.sym, e.len as u32)
+            } else {
+                self.decode_long(acc)?
+            };
+            out[i] = s;
+            pos += l as u64;
+            i += 1;
+        }
+        Ok(pos)
+    }
+}
+
 /// Moffat and Katajainen, "In-place calculation of minimum-redundancy codes" (1995): `a` holds the
 /// weights in ascending order and receives the code lengths.
 fn minimum_redundancy(a: &mut [u64]) {
@@ -574,32 +650,11 @@ impl Encoder for HuffmanEncoder {
             return corrupt("Huffman: payload does not match the value count");
         }
         let mut out = vec![0i32; n];
-        let tb = self.table_bits;
-        let table = &self.table;
-        let mut pos: u64 = 0;
-        for o in out.iter_mut() {
-            let byte = (pos >> 3) as usize;
-            let word = if byte + 8 <= nbytes {
-                u64::from_be_bytes(p[byte..byte + 8].try_into().unwrap())
-            } else {
-                if byte >= nbytes {
-                    return corrupt("Huffman: payload length does not match its codes");
-                }
-                let mut tail = [0u8; 8];
-                tail[..nbytes - byte].copy_from_slice(&p[byte..]);
-                u64::from_be_bytes(tail)
-            };
-            let acc = word << (pos & 7);
-            let e = table[(acc >> (64 - tb)) as usize];
-            if e.len != 0 {
-                *o = e.sym;
-                pos += e.len as u64;
-            } else {
-                let (s, l) = self.decode_long(acc)?;
-                *o = s;
-                pos += l as u64;
-            }
-        }
+        let pos = if self.count[1] != 0 {
+            self.decode_payload::<true>(p, &mut out)?
+        } else {
+            self.decode_payload::<false>(p, &mut out)?
+        };
         if pos != bits {
             return corrupt("Huffman: payload length does not match its codes");
         }

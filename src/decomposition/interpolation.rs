@@ -38,9 +38,6 @@ fn interp_cubic<T: SzFloat>(a: T, b: T, c: T, d: T) -> T {
     (-a + T::c(9) * b + T::c(9) * c - d) / T::c(16)
 }
 
-/// Per-point callback: `(data, position, prediction)`.
-type Visit<'a, T> = dyn FnMut(&mut [T], usize, T) -> Result<()> + 'a;
-
 /// The grid geometry an interpolation pass walks.
 struct Grid<const N: usize> {
     dims: [usize; N],
@@ -90,14 +87,14 @@ fn foreach<const N: usize>(
 
 impl<const N: usize> Grid<N> {
     /// Interpolates along one dimension, the original (ICDE'21) scheme.
-    fn interpolation_1d<T: SzFloat>(
+    fn interpolation_1d<T: SzFloat, F: FnMut(&mut [T], usize, T) -> Result<()>>(
         &self,
         data: &mut [T],
         begin: usize,
         end: usize,
         stride: usize,
         cubic: bool,
-        f: &mut Visit<T>,
+        f: &mut F,
     ) -> Result<()> {
         let n = (end - begin) / stride + 1;
         if n <= 1 {
@@ -149,7 +146,7 @@ impl<const N: usize> Grid<N> {
     /// All interpolations along `direction` over a sub-grid, moving along the fastest
     /// dimension (SIGMOD'24).
     #[allow(clippy::too_many_arguments)]
-    fn interpolation_1d_fastest_dim_first<T: SzFloat>(
+    fn interpolation_1d_fastest_dim_first<T: SzFloat, F: FnMut(&mut [T], usize, T) -> Result<()>>(
         &self,
         data: &mut [T],
         begin_idx: &[usize; N],
@@ -158,7 +155,7 @@ impl<const N: usize> Grid<N> {
         strides: &mut [usize; N],
         math_stride: usize,
         cubic: bool,
-        f: &mut Visit<T>,
+        f: &mut F,
     ) -> Result<()> {
         if (0..N).any(|i| end_idx[i] < begin_idx[i]) {
             return Ok(());
@@ -244,13 +241,13 @@ impl<const N: usize> Grid<N> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn interpolation<T: SzFloat>(
+    fn interpolation<T: SzFloat, F: FnMut(&mut [T], usize, T) -> Result<()>>(
         &self,
         data: &mut [T],
         begin: [usize; N],
         end: [usize; N],
         cubic: bool,
-        f: &mut Visit<T>,
+        f: &mut F,
         direction: usize,
         stride: usize,
     ) -> Result<()> {
@@ -450,8 +447,8 @@ impl<T: SzFloat, const N: usize, Q: Quantizer<T>> InterpolationDecomposition<T, 
         grid: &Grid<N>,
         data: &mut [T],
         eb: f64,
-        anchor: &mut dyn FnMut(&mut Q, &mut [T], usize) -> Result<()>,
-        point: &mut dyn FnMut(&mut Q, &mut [T], usize, T) -> Result<()>,
+        anchor: &mut impl FnMut(&mut Q, &mut [T], usize) -> Result<()>,
+        point: &mut impl FnMut(&mut Q, &mut [T], usize, T) -> Result<()>,
     ) -> Result<()> {
         if self.anchor_stride == 0 {
             point(&mut self.quantizer, data, 0, T::ZERO)?;
@@ -515,26 +512,24 @@ impl<T: SzFloat, const N: usize, Q: Quantizer<T>> Decomposition<T> for Interpola
         self.eb_alpha = conf.interp_alpha;
         self.eb_beta = conf.interp_beta;
         let grid = self.init()?;
-        let bins = vec![0i32; self.num_elements];
+        let mut bins = vec![0i32; self.num_elements];
         let eb = self.quantizer.eb();
-        let bins_cell = std::cell::RefCell::new((bins, 0usize));
+        // Anchors are stored losslessly and keep bin 0, so only the index advances for them.
+        let idx = std::cell::Cell::new(0usize);
         let mut anchor = |q: &mut Q, data: &mut [T], d: usize| {
-            let mut b = bins_cell.borrow_mut();
-            let i = b.1;
-            b.0[i] = q.force_save_unpred(data[d]);
-            b.1 += 1;
+            q.force_save_unpred(data[d]);
+            idx.set(idx.get() + 1);
             Ok(())
         };
         let mut point = |q: &mut Q, data: &mut [T], d: usize, p: T| {
-            let mut b = bins_cell.borrow_mut();
-            let i = b.1;
-            b.0[i] = q.quantize_and_overwrite(&mut data[d], p);
-            b.1 += 1;
+            let i = idx.get();
+            bins[i] = q.quantize_and_overwrite(&mut data[d], p);
+            idx.set(i + 1);
             Ok(())
         };
         self.walk(&grid, &mut data[..conf.num], eb, &mut anchor, &mut point)?;
         self.quantizer.set_eb(eb);
-        Ok(bins_cell.into_inner().0)
+        Ok(bins)
     }
 
     fn decompress(&mut self, conf: &Config, bins: &[i32], out: &mut [T]) -> Result<()> {
