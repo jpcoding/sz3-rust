@@ -435,6 +435,35 @@ impl HuffmanEncoder {
     }
 }
 
+/// Frequency of each `bin - off` in `0..span`.
+fn count_dense(bins: &[i32], off: u32, span: usize) -> Vec<u64> {
+    if bins.len() > u32::MAX as usize {
+        let mut f = vec![0u64; span];
+        for &b in bins {
+            f[(b as u32).wrapping_sub(off) as usize] += 1;
+        }
+        return f;
+    }
+    // Runs of one bin make one counter a store-to-load chain; four counters break it.
+    let mut f4 = vec![0u32; 4 * span];
+    let (f0, rest) = f4.split_at_mut(span);
+    let (f1, rest) = rest.split_at_mut(span);
+    let (f2, f3) = rest.split_at_mut(span);
+    let chunks = bins.chunks_exact(4);
+    for &b in chunks.remainder() {
+        f0[(b as u32).wrapping_sub(off) as usize] += 1;
+    }
+    for c in chunks {
+        f0[(c[0] as u32).wrapping_sub(off) as usize] += 1;
+        f1[(c[1] as u32).wrapping_sub(off) as usize] += 1;
+        f2[(c[2] as u32).wrapping_sub(off) as usize] += 1;
+        f3[(c[3] as u32).wrapping_sub(off) as usize] += 1;
+    }
+    (0..span)
+        .map(|k| f0[k] as u64 + f1[k] as u64 + f2[k] as u64 + f3[k] as u64)
+        .collect()
+}
+
 /// Moffat and Katajainen, "In-place calculation of minimum-redundancy codes" (1995): `a` holds the
 /// weights in ascending order and receives the code lengths.
 fn minimum_redundancy(a: &mut [u64]) {
@@ -488,21 +517,26 @@ impl Encoder for HuffmanEncoder {
         if bins.is_empty() {
             return;
         }
-        let (mut mn, mut mx) = (bins[0], bins[0]);
-        for &b in bins {
-            mn = mn.min(b);
-            mx = mx.max(b);
+        let (mut mn, mut mx) = ([bins[0]; 8], [bins[0]; 8]);
+        let chunks = bins.chunks_exact(8);
+        for &b in chunks.remainder() {
+            mn[0] = mn[0].min(b);
+            mx[0] = mx[0].max(b);
         }
+        for c in chunks {
+            for k in 0..8 {
+                mn[k] = mn[k].min(c[k]);
+                mx[k] = mx[k].max(c[k]);
+            }
+        }
+        let (mn, mx) = (*mn.iter().min().unwrap(), *mx.iter().max().unwrap());
         self.offset = mn;
         let off = mn as u32;
         let top = (mx as u32).wrapping_sub(off) as u64;
         self.dense = top < 4096.max(2 * bins.len() as u64);
         let mut freq = Vec::new();
         if self.dense {
-            let mut f = vec![0u64; top as usize + 1];
-            for &b in bins {
-                f[(b as u32).wrapping_sub(off) as usize] += 1;
-            }
+            let f = count_dense(bins, off, top as usize + 1);
             for (k, &c) in f.iter().enumerate() {
                 if c != 0 {
                     self.syms.push(k as u64);
@@ -564,44 +598,50 @@ impl Encoder for HuffmanEncoder {
             return Ok(());
         }
         let start = out.len();
-        out.reserve(self.payload_bits.div_ceil(8) as usize + 8);
+        // Bins preprocess_encode counted take payload_bits; an unseen one takes none, so the
+        // payload never outgrows this.
+        out.resize(start + self.payload_bits.div_ceil(8) as usize + 8, 0);
+        let buf = &mut out[start..];
         let off = self.offset as u32;
         let mut acc: u64 = 0;
         let mut nb: u32 = 0;
-        let mut put = |e: u64, out: &mut Vec<u8>| {
+        let mut p = 0usize;
+        let mut put = |e: u64| {
             let len = (e & 0xff) as u32;
             acc = (acc << len) | (e >> 8);
             nb += len;
             if nb >= 32 {
                 nb -= 32;
-                out.extend_from_slice(&((acc >> nb) as u32).to_be_bytes());
+                buf[p..p + 4].copy_from_slice(&((acc >> nb) as u32).to_be_bytes());
+                p += 4;
             }
         };
         if self.dense {
             let tab = &self.dense_codes;
             for &b in bins {
                 let s = (b as u32).wrapping_sub(off) as usize;
-                let e = *tab.get(s).ok_or_else(not_seen)?;
-                put(e, out);
+                put(*tab.get(s).ok_or_else(not_seen)?);
             }
         } else {
             for &b in bins {
-                let e = self
+                put(self
                     .sparse_codes
                     .get(&(b as u32).wrapping_sub(off))
                     .copied()
-                    .unwrap_or(0);
-                put(e, out);
+                    .unwrap_or(0));
             }
         }
-        let bits = (out.len() - start) as u64 * 8 + nb as u64;
+        let bits = p as u64 * 8 + nb as u64;
         while nb >= 8 {
             nb -= 8;
-            out.push((acc >> nb) as u8);
+            buf[p] = (acc >> nb) as u8;
+            p += 1;
         }
         if nb > 0 {
-            out.push((acc << (8 - nb)) as u8);
+            buf[p] = (acc << (8 - nb)) as u8;
+            p += 1;
         }
+        out.truncate(start + p);
         // A bin preprocess_encode did not count has a zero-length entry.
         if bits != self.payload_bits {
             return Err(Error::InvalidArgument(

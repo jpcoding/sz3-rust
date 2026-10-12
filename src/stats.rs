@@ -4,19 +4,30 @@ use crate::config::{Config, eb};
 use crate::error::{Error, Result};
 use crate::types::SzFloat;
 
-/// max - min, computed in `T` as SZ3 does.
+/// max - min, computed in `T` as SZ3 does: a NaN never displaces an extreme, and a NaN first
+/// value poisons both.
 pub fn data_range<T: SzFloat>(data: &[T]) -> T {
-    let mut max = data[0];
-    let mut min = data[0];
-    for &v in &data[1..] {
-        if max < v {
-            max = v;
-        }
-        if min > v {
-            min = v;
+    // Eight independent lanes so the comparisons vectorize; max and min do not depend on the order.
+    const L: usize = 8;
+    let (mut max, mut min) = ([data[0]; L], [data[0]; L]);
+    let chunks = data[1..].chunks_exact(L);
+    let rest = chunks.remainder();
+    for c in chunks {
+        for k in 0..L {
+            max[k] = if max[k] < c[k] { c[k] } else { max[k] };
+            min[k] = if min[k] > c[k] { c[k] } else { min[k] };
         }
     }
-    max - min
+    let (mut mx, mut mn) = (max[0], min[0]);
+    for k in 1..L {
+        mx = if mx < max[k] { max[k] } else { mx };
+        mn = if mn > min[k] { min[k] } else { mn };
+    }
+    for &v in rest {
+        mx = if mx < v { v } else { mx };
+        mn = if mn > v { v } else { mn };
+    }
+    mx - mn
 }
 
 pub fn factorial(n: usize) -> usize {
