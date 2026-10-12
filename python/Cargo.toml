@@ -1,0 +1,16 @@
+[package]
+name = "pysz-rs"
+version = "0.1.0"
+edition = "2024"
+description = "Python bindings of sz3-rust, with the API of SZ3's pysz"
+
+[lib]
+name = "_pysz"
+crate-type = ["cdylib"]
+
+[dependencies]
+sz3 = { path = ".." }
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py39"] }
+numpy = "0.29"
+
+[workspace]

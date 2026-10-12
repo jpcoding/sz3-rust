@@ -1,0 +1,15 @@
+/home/jp/git/sz3-rust/python/target/debug/deps/target_lexicon-b79e43c521b50eba.d: /home/jp/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.13.5/src/lib.rs /home/jp/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.13.5/src/data_model.rs /home/jp/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.13.5/src/host.rs /home/jp/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.13.5/src/parse_error.rs /home/jp/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.13.5/src/targets.rs /home/jp/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.13.5/src/triple.rs /home/jp/git/sz3-rust/python/target/debug/build/target-lexicon-60de879c28d87cc2/out/host.rs
+
+/home/jp/git/sz3-rust/python/target/debug/deps/libtarget_lexicon-b79e43c521b50eba.rlib: /home/jp/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.13.5/src/lib.rs /home/jp/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.13.5/src/data_model.rs /home/jp/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.13.5/src/host.rs /home/jp/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.13.5/src/parse_error.rs /home/jp/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.13.5/src/targets.rs /home/jp/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.13.5/src/triple.rs /home/jp/git/sz3-rust/python/target/debug/build/target-lexicon-60de879c28d87cc2/out/host.rs
+
+/home/jp/git/sz3-rust/python/target/debug/deps/libtarget_lexicon-b79e43c521b50eba.rmeta: /home/jp/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.13.5/src/lib.rs /home/jp/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.13.5/src/data_model.rs /home/jp/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.13.5/src/host.rs /home/jp/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.13.5/src/parse_error.rs /home/jp/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.13.5/src/targets.rs /home/jp/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.13.5/src/triple.rs /home/jp/git/sz3-rust/python/target/debug/build/target-lexicon-60de879c28d87cc2/out/host.rs
+
+/home/jp/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.13.5/src/lib.rs:
+/home/jp/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.13.5/src/data_model.rs:
+/home/jp/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.13.5/src/host.rs:
+/home/jp/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.13.5/src/parse_error.rs:
+/home/jp/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.13.5/src/targets.rs:
+/home/jp/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.13.5/src/triple.rs:
+/home/jp/git/sz3-rust/python/target/debug/build/target-lexicon-60de879c28d87cc2/out/host.rs:
+
+# env-dep:OUT_DIR=/home/jp/git/sz3-rust/python/target/debug/build/target-lexicon-60de879c28d87cc2/out

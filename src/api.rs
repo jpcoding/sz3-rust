@@ -335,6 +335,26 @@ pub fn decompress<T: SzData>(cmp: &[u8]) -> Result<(Config, Vec<T>)> {
     Ok((conf, out))
 }
 
+/// The configuration stored in a stream, without decompressing it.
+pub fn stream_config(cmp: &[u8]) -> Result<Config> {
+    if cmp.len() < 16 {
+        return corrupt("compressed data is smaller than the header");
+    }
+    let mut r = Reader::new(cmp);
+    if r.u32()? != SZ3_MAGIC_NUMBER {
+        return Err(Error::InvalidArgument("magic number mismatch, the input data is not compressed by SZ3".into()));
+    }
+    let ver = r.u32()?;
+    let size = r.u64()?;
+    if size > (cmp.len() - 16) as u64 {
+        return corrupt("compressed payload size exceeds the buffer");
+    }
+    r.skip(size as usize)?;
+    let mut conf = Config { sz3_data_ver: ver, ..Config::default() };
+    conf.load(&mut r)?;
+    Ok(conf)
+}
+
 fn alloc<F: Clone + Default>(n: usize) -> Result<Vec<F>> {
     let mut v = Vec::new();
     v.try_reserve_exact(n)

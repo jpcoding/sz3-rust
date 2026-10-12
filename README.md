@@ -103,3 +103,8 @@ gives the same streams and values with this one (`capi/tests/sz3c_test.c`).
 cargo build --release -p sz3-capi     # target/release/libSZ3c.{so,a}
 cc -Icapi/include prog.c -Ltarget/release -lSZ3c
 ```
+
+## Python
+
+`python/` builds the `pysz` module (PyO3, maturin) with the API of SZ3's pysz; pysz's own tests
+pass against it. See [python/README.md](python/README.md).
