@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 
-use super::Encoder;
+use super::{BinStream, Encoder};
 use crate::bytes::{ByteWriter, Reader};
 use crate::error::{Error, Result, corrupt};
 
@@ -23,6 +23,17 @@ struct Entry {
     /// 0: the code is longer than the table, or is not a code.
     len: u8,
 }
+
+/// Up to three whole codes in the next [`MULTI_BITS`] bits: their ranks in `sorted`, how many,
+/// and their total length. `count` 0: the first code is longer than [`TABLE_BITS`].
+#[derive(Clone, Copy, Default)]
+struct Multi {
+    ranks: [u16; 3],
+    count: u8,
+    len: u8,
+}
+
+const MULTI_BITS: u32 = 12;
 
 #[derive(Clone)]
 pub struct HuffmanEncoder {
@@ -46,6 +57,7 @@ pub struct HuffmanEncoder {
     limit: [u64; MAX_LEN + 1],
     sorted: Vec<i32>,
     table: Vec<Entry>,
+    multi: Box<[Multi; 1 << MULTI_BITS]>,
 }
 
 #[inline]
@@ -156,6 +168,7 @@ impl Default for HuffmanEncoder {
             limit: [0; MAX_LEN + 1],
             sorted: Vec::new(),
             table: Vec::new(),
+            multi: Box::new([Multi::default(); 1 << MULTI_BITS]),
         }
     }
 }
@@ -339,6 +352,25 @@ impl HuffmanEncoder {
                 self.table[lo..lo + (1 << (tb - l))].fill(e);
             }
         }
+        // the table's ranks fit in u16: they number the codes of at most TABLE_BITS bits
+        let mb = MULTI_BITS as usize;
+        for idx in 0..1usize << mb {
+            let mut m = Multi::default();
+            let mut used = 0usize;
+            while (m.count as usize) < 3 {
+                let w = (idx << used) & ((1 << mb) - 1);
+                let l = self.table[w >> (mb - tb)].len as usize;
+                if l == 0 || used + l > mb {
+                    break;
+                }
+                let w = (w >> (mb - l)) as u64;
+                m.ranks[m.count as usize] = (self.base[l] + (w - self.first[l])) as u16;
+                m.count += 1;
+                used += l;
+            }
+            m.len = used as u8;
+            self.multi[idx] = m;
+        }
         Ok(())
     }
 
@@ -360,12 +392,12 @@ impl HuffmanEncoder {
 }
 
 impl HuffmanEncoder {
-    /// Decodes `out.len()` symbols from `p`; returns the bits consumed.
+    /// Decodes `out.len()` symbols from bit `pos` of `p`; returns the position after them.
     ///
     /// While 8 bytes remain, one big-endian load feeds several symbols. With `ZERO_RUNS` (a
     /// one-bit code exists), a byte of zeros is a run of that code's symbol, and a byte of ones a
     /// run of the second one-bit symbol when there are two; such runs are filled in bulk.
-    fn decode_payload<const ZERO_RUNS: bool>(&self, p: &[u8], out: &mut [i32]) -> Result<u64> {
+    fn decode_payload<const ZERO_RUNS: bool>(&self, p: &[u8], out: &mut [i32], mut pos: u64) -> Result<u64> {
         let n = out.len();
         let nbytes = p.len();
         let tb = self.table_bits;
@@ -374,12 +406,16 @@ impl HuffmanEncoder {
         let zero_sym = self.sorted[0];
         let one_runs = self.count[1] == 2;
         let one_sym = if one_runs { self.sorted[1] } else { 0 };
-        let mut pos: u64 = 0;
+        let multi = &*self.multi;
+        let sorted = &self.sorted[..];
+        // a lookup reads MULTI_BITS bits and a code may be ml long; both must be loaded
+        let need = ml.max(MULTI_BITS);
         let mut i = 0usize;
-        while i < n && (pos >> 3) as usize + 8 <= nbytes {
+        while i + 3 <= n && (pos >> 3) as usize + 8 <= nbytes {
             let byte = (pos >> 3) as usize;
             let mut acc = u64::from_be_bytes(p[byte..byte + 8].try_into().unwrap()) << (pos & 7);
-            let mut avail = 64 - (pos & 7) as u32;
+            let start = 64 - (pos & 7) as u32;
+            let mut avail = start;
             loop {
                 let len;
                 let top = acc >> 56;
@@ -393,24 +429,30 @@ impl HuffmanEncoder {
                     acc = if len < 64 { acc << len } else { 0 };
                     i += run;
                 } else {
-                    let e = table[(acc >> (64 - tb)) as usize];
-                    if e.len != 0 {
-                        out[i] = e.sym;
-                        len = e.len as u32;
+                    let m = multi[(acc >> (64 - MULTI_BITS)) as usize];
+                    if m.count != 0 {
+                        // all three slots are written; the ones past count are overwritten next
+                        if let Some(o) = out.get_mut(i..i + 3) {
+                            o[0] = sorted.get(m.ranks[0] as usize).copied().unwrap_or(0);
+                            o[1] = sorted.get(m.ranks[1] as usize).copied().unwrap_or(0);
+                            o[2] = sorted.get(m.ranks[2] as usize).copied().unwrap_or(0);
+                        }
+                        len = m.len as u32;
+                        i += m.count as usize;
                     } else {
                         let (s, l) = self.decode_long(acc)?;
                         out[i] = s;
                         len = l;
+                        i += 1;
                     }
                     acc <<= len;
-                    i += 1;
                 }
                 avail -= len;
-                pos += len as u64;
-                if avail < ml || i >= n {
+                if avail < need || i + 3 > n {
                     break;
                 }
             }
+            pos += (start - avail) as u64;
         }
         while i < n {
             let byte = (pos >> 3) as usize;
@@ -691,14 +733,57 @@ impl Encoder for HuffmanEncoder {
         }
         let mut out = vec![0i32; n];
         let pos = if self.count[1] != 0 {
-            self.decode_payload::<true>(p, &mut out)?
+            self.decode_payload::<true>(p, &mut out, 0)?
         } else {
-            self.decode_payload::<false>(p, &mut out)?
+            self.decode_payload::<false>(p, &mut out, 0)?
         };
         if pos != bits {
             return corrupt("Huffman: payload length does not match its codes");
         }
         Ok(out)
+    }
+
+    fn decode_stream<'a>(&'a self, r: &mut Reader<'a>, n: usize) -> Result<BinStream<'a>> {
+        let bits = r.u64()?;
+        if bits > r.remaining() as u64 * 8 {
+            return corrupt("Huffman: payload exceeds the buffer");
+        }
+        let nbytes = bits.div_ceil(8) as usize;
+        let p = r.take(nbytes)?;
+        if self.syms.len() < 2 {
+            if bits != 0 || (self.syms.is_empty() && n != 0) {
+                return corrupt("Huffman: payload does not match the code table");
+            }
+            let offset = self.offset;
+            return Ok(BinStream::new(
+                n,
+                Box::new(move |out: &mut [i32]| {
+                    out.fill(offset);
+                    Ok(())
+                }),
+            ));
+        }
+        if bits < n as u64 || bits / MAX_LEN as u64 > n as u64 {
+            return corrupt("Huffman: payload does not match the value count");
+        }
+        let zero_runs = self.count[1] != 0;
+        let mut pos = 0u64;
+        let mut left = n;
+        Ok(BinStream::new(
+            n,
+            Box::new(move |out: &mut [i32]| {
+                pos = if zero_runs {
+                    self.decode_payload::<true>(p, out, pos)?
+                } else {
+                    self.decode_payload::<false>(p, out, pos)?
+                };
+                left -= out.len();
+                if left == 0 && pos != bits {
+                    return corrupt("Huffman: payload length does not match its codes");
+                }
+                Ok(())
+            }),
+        ))
     }
 }
 

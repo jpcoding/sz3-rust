@@ -372,11 +372,12 @@ pub fn stream_config(cmp: &[u8]) -> Result<Config> {
 }
 
 fn alloc<F: Clone + Default>(n: usize) -> Result<Vec<F>> {
-    let mut v = Vec::new();
-    v.try_reserve_exact(n)
+    // Probe fallibly, then let `vec!` take zeroed pages from the allocator: a memset of the whole
+    // output would only be overwritten.
+    Vec::<F>::new()
+        .try_reserve_exact(n)
         .map_err(|_| Error::Corrupt(format!("cannot allocate {n} values")))?;
-    v.resize(n, F::default());
-    Ok(v)
+    Ok(vec![F::default(); n])
 }
 
 fn decompress_payload<T: SzData>(conf: &mut Config, payload: &[u8]) -> Result<Vec<T>> {

@@ -3,11 +3,13 @@
 //! Level by level, from coarse to fine, every point midway between known points is predicted by
 //! linear or cubic interpolation along one dimension at a time, then quantized.
 
+use std::cell::Cell;
 use std::marker::PhantomData;
 
 use super::{Decomposition, dims_array};
 use crate::bytes::{ByteWriter, Reader};
 use crate::config::Config;
+use crate::encoder::BinStream;
 use crate::error::{Error, Result, corrupt};
 use crate::quantizer::{LinearKernel, Quantizer};
 use crate::types::SzFloat;
@@ -64,6 +66,70 @@ trait Visit<T> {
             j += step;
         }
     }
+    /// [`Visit::row`] with linear interpolation from `j - s` and `j + s`.
+    #[inline(always)]
+    fn linear(&mut self, row: &mut [T], start: usize, step: usize, s: usize)
+    where
+        T: SzFloat,
+    {
+        self.row(row, start, step, s, |r, j| interp_linear(r[j - s], r[j + s]));
+    }
+    /// [`Visit::row`] with cubic interpolation from `j - 3s`, `j - s`, `j + s` and `j + 3s`.
+    #[inline(always)]
+    fn cubic(&mut self, row: &mut [T], start: usize, step: usize, s: usize)
+    where
+        T: SzFloat,
+    {
+        let s3 = 3 * s;
+        self.row(row, start, step, s3, |r, j| {
+            interp_cubic(r[j - s3], r[j - s], r[j + s], r[j + s3])
+        });
+    }
+}
+
+/// The points of [`Visit::linear`] and their predictions. The rows are cells, so every point is
+/// written while its neighbours are read; the iterator over the last neighbour bounds the count,
+/// leaving no bounds checks.
+#[inline(always)]
+fn linear_points<T: SzFloat>(
+    row: &mut [T],
+    start: usize,
+    step: usize,
+    s: usize,
+) -> impl Iterator<Item = (&Cell<T>, T)> {
+    let c = Cell::from_mut(row).as_slice_of_cells();
+    // every index moves in step with the last one, which the loop bounds
+    let (mut l, mut t, mut r) = (start.wrapping_sub(s), start, start + s);
+    std::iter::from_fn(move || {
+        if r >= c.len() || l >= r {
+            return None;
+        }
+        let x = (&c[t], interp_linear(c[l].get(), c[r].get()));
+        l += step;
+        t += step;
+        r += step;
+        Some(x)
+    })
+}
+
+/// As [`linear_points`], for [`Visit::cubic`].
+#[inline(always)]
+fn cubic_points<T: SzFloat>(row: &mut [T], start: usize, step: usize, s: usize) -> impl Iterator<Item = (&Cell<T>, T)> {
+    let c = Cell::from_mut(row).as_slice_of_cells();
+    let (mut a, mut b, mut t) = (start.wrapping_sub(3 * s), start.wrapping_sub(s), start);
+    let (mut d, mut e) = (start + s, start + 3 * s);
+    std::iter::from_fn(move || {
+        if e >= c.len() || a >= e {
+            return None;
+        }
+        let x = (&c[t], interp_cubic(c[a].get(), c[b].get(), c[d].get(), c[e].get()));
+        a += step;
+        b += step;
+        t += step;
+        d += step;
+        e += step;
+        Some(x)
+    })
 }
 
 /// Calls `f` on `offset + sum(i_k * dim_offsets[k])` for `i_k` in `begins[k]..ends[k]` stepping
@@ -173,9 +239,7 @@ impl<const N: usize> Grid<N> {
         if !cubic || n < 5 {
             // i = 1, 3, ... while i + 1 < n
             if let Some(row) = data.get_mut(begin..=end) {
-                v.row(row, stride, 2 * stride, stride, |r, j| {
-                    interp_linear(r[j - stride], r[j + stride])
-                });
+                v.linear(row, stride, 2 * stride, stride);
             }
             if n.is_multiple_of(2) {
                 let d = begin + (n - 1) * stride;
@@ -189,9 +253,7 @@ impl<const N: usize> Grid<N> {
         } else {
             // i = 3, 5, ... while i + 3 < n
             if let Some(row) = data.get_mut(begin..=end) {
-                v.row(row, s3, 2 * stride, s3, |r, j| {
-                    interp_cubic(r[j - s3], r[j - stride], r[j + stride], r[j + s3])
-                });
+                v.cubic(row, s3, 2 * stride, stride);
             }
             let mut i = 3;
             while i + 3 < n {
@@ -252,9 +314,7 @@ impl<const N: usize> Grid<N> {
                 let Some(row) = row_window(data, first, count, step, stride) else {
                     return;
                 };
-                v.row(row, stride, step, stride, |r, j| {
-                    interp_linear(r[j - stride], r[j + stride])
-                });
+                v.linear(row, stride, step, stride);
             });
             if n.is_multiple_of(2) {
                 begins[direction] = n - 1;
@@ -277,9 +337,7 @@ impl<const N: usize> Grid<N> {
                 let Some(row) = row_window(data, first, count, step, s3) else {
                     return;
                 };
-                v.row(row, s3, step, s3, |r, j| {
-                    interp_cubic(r[j - s3], r[j - stride], r[j + stride], r[j + s3])
-                });
+                v.cubic(row, s3, step, stride);
             });
             let mut boundaries = vec![1usize];
             if n % 2 == 1 && n > 3 {
@@ -623,23 +681,36 @@ struct CompressLinear<'a, T> {
     k: usize,
 }
 
-impl<T: SzFloat> Visit<T> for CompressLinear<'_, T> {
+impl<T: SzFloat> CompressLinear<'_, T> {
     #[inline(always)]
-    fn row<F: Fn(&[T], usize) -> T>(&mut self, row: &mut [T], start: usize, step: usize, reach: usize, pred: F) {
+    fn points<'c>(&mut self, pts: impl Iterator<Item = (&'c Cell<T>, T)>)
+    where
+        T: 'c,
+    {
         // locals, so nothing is reloaded after each store to the row
         let q = self.q;
         let mut k = self.k;
-        let mut j = start;
-        while j + reach < row.len() {
-            let p = pred(row, j);
-            let b = q.quantize(&mut row[j], p, self.unpred);
+        for (x, p) in pts {
+            let mut v = x.get();
+            let b = q.quantize(&mut v, p, self.unpred);
+            x.set(v);
             if let Some(slot) = self.bins.get_mut(k) {
                 *slot = b;
             }
             k += 1;
-            j += step;
         }
         self.k = k;
+    }
+}
+
+impl<T: SzFloat> Visit<T> for CompressLinear<'_, T> {
+    #[inline(always)]
+    fn linear(&mut self, row: &mut [T], start: usize, step: usize, s: usize) {
+        self.points(linear_points(row, start, step, s));
+    }
+    #[inline(always)]
+    fn cubic(&mut self, row: &mut [T], start: usize, step: usize, s: usize) {
+        self.points(cubic_points(row, start, step, s));
     }
     #[inline(always)]
     fn anchor(&mut self, data: &mut [T], d: usize) {
@@ -659,30 +730,28 @@ impl<T: SzFloat> Visit<T> for CompressLinear<'_, T> {
 }
 
 /// Decompression through any quantizer; the first error is kept.
-struct Decompress<'a, Q> {
+struct Decompress<'a, 'b, Q> {
     q: &'a mut Q,
-    bins: &'a [i32],
-    k: usize,
+    bins: &'a mut BinStream<'b>,
     err: Option<Error>,
 }
 
-impl<T: SzFloat, Q: Quantizer<T>> Visit<T> for Decompress<'_, Q> {
+impl<T: SzFloat, Q: Quantizer<T>> Visit<T> for Decompress<'_, '_, Q> {
     #[inline(always)]
     fn anchor(&mut self, data: &mut [T], d: usize) {
         match self.q.recover_unpred() {
             Ok(v) => data[d] = v,
             Err(e) => self.err = Some(e),
         }
-        self.k += 1;
+        self.bins.next_bin();
     }
     #[inline(always)]
     fn point(&mut self, x: &mut T, pred: T) {
-        let b = self.bins.get(self.k).copied().unwrap_or(0);
+        let b = self.bins.next_bin();
         match self.q.recover(pred, b) {
             Ok(v) => *x = v,
             Err(e) => self.err = Some(e),
         }
-        self.k += 1;
     }
     fn set_eb(&mut self, eb: f64) {
         self.q.set_eb(eb);
@@ -690,37 +759,57 @@ impl<T: SzFloat, Q: Quantizer<T>> Visit<T> for Decompress<'_, Q> {
 }
 
 /// Decompression through a linear quantizer's arithmetic, held by value.
-struct DecompressLinear<'a, T> {
+struct DecompressLinear<'a, 'b, T> {
     q: LinearKernel,
     unpred: &'a [T],
     index: &'a mut usize,
-    bins: &'a [i32],
-    k: usize,
+    bins: &'a mut BinStream<'b>,
     err: Option<Error>,
 }
 
-impl<T: SzFloat> Visit<T> for DecompressLinear<'_, T> {
+impl<T: SzFloat> DecompressLinear<'_, '_, T> {
     #[inline(always)]
-    fn row<F: Fn(&[T], usize) -> T>(&mut self, row: &mut [T], start: usize, step: usize, reach: usize, pred: F) {
+    fn points<'c>(&mut self, pts: impl Iterator<Item = (&'c Cell<T>, T)>)
+    where
+        T: 'c,
+    {
         // locals, so nothing is reloaded after each store to the row
         let q = self.q;
-        let bins = self.bins;
         let unpred = self.unpred;
         let mut index = *self.index;
-        let mut k = self.k;
-        let mut j = start;
-        while j + reach < row.len() {
-            let p = pred(row, j);
-            let b = bins.get(k).copied().unwrap_or(0);
+        let mut bins = self.bins.rest();
+        for (x, p) in pts {
+            let b = match bins.split_first() {
+                Some((&b, rest)) => {
+                    bins = rest;
+                    b
+                }
+                None => {
+                    self.bins.keep(0);
+                    let b = self.bins.next_bin();
+                    bins = self.bins.rest();
+                    b
+                }
+            };
             match q.recover(p, b, unpred, &mut index) {
-                Ok(v) => row[j] = v,
+                Ok(v) => x.set(v),
                 Err(e) => self.err = Some(e),
             }
-            k += 1;
-            j += step;
         }
-        self.k = k;
+        let left = bins.len();
+        self.bins.keep(left);
         *self.index = index;
+    }
+}
+
+impl<T: SzFloat> Visit<T> for DecompressLinear<'_, '_, T> {
+    #[inline(always)]
+    fn linear(&mut self, row: &mut [T], start: usize, step: usize, s: usize) {
+        self.points(linear_points(row, start, step, s));
+    }
+    #[inline(always)]
+    fn cubic(&mut self, row: &mut [T], start: usize, step: usize, s: usize) {
+        self.points(cubic_points(row, start, step, s));
     }
     #[inline(always)]
     fn anchor(&mut self, data: &mut [T], d: usize) {
@@ -735,17 +824,15 @@ impl<T: SzFloat> Visit<T> for DecompressLinear<'_, T> {
                 ))
             }
         }
-        self.k += 1;
+        self.bins.next_bin();
     }
     #[inline(always)]
     fn point(&mut self, x: &mut T, pred: T) {
-        // decompress() checked there are as many bins as points
-        let b = self.bins.get(self.k).copied().unwrap_or(0);
+        let b = self.bins.next_bin();
         match self.q.recover(pred, b, self.unpred, self.index) {
             Ok(v) => *x = v,
             Err(e) => self.err = Some(e),
         }
-        self.k += 1;
     }
     fn set_eb(&mut self, eb: f64) {
         self.q.error_bound = eb;
@@ -795,6 +882,12 @@ impl<T: SzFloat, const N: usize, Q: Quantizer<T>> Decomposition<T> for Interpola
     }
 
     fn decompress(&mut self, conf: &Config, bins: &[i32], out: &mut [T]) -> Result<()> {
+        let mut bins = BinStream::from_vec(bins.to_vec());
+        self.decompress_stream(conf, &mut bins, out)?;
+        bins.finish()
+    }
+
+    fn decompress_stream(&mut self, conf: &Config, bins: &mut BinStream, out: &mut [T]) -> Result<()> {
         // load() read the dimensions from the payload; the walk must stay inside conf's data.
         if conf.dims.len() != N || conf.dims[..] != self.dims[..] {
             return corrupt("interpolation: stored dimensions do not match the configuration");
@@ -813,7 +906,6 @@ impl<T: SzFloat, const N: usize, Q: Quantizer<T>> Decomposition<T> for Interpola
                     unpred,
                     index,
                     bins,
-                    k: 0,
                     err: None,
                 };
                 walk.run(&grid, out, eb, &mut v);
@@ -823,7 +915,6 @@ impl<T: SzFloat, const N: usize, Q: Quantizer<T>> Decomposition<T> for Interpola
                 let mut v = Decompress {
                     q: &mut self.quantizer,
                     bins,
-                    k: 0,
                     err: None,
                 };
                 walk.run(&grid, out, eb, &mut v);

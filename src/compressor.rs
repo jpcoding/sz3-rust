@@ -9,7 +9,7 @@ use std::marker::PhantomData;
 use crate::bytes::{ByteWriter, Reader};
 use crate::config::Config;
 use crate::decomposition::Decomposition;
-use crate::encoder::Encoder;
+use crate::encoder::{BinStream, Encoder};
 use crate::error::{Error, Result, corrupt};
 use crate::lossless::Lossless;
 use crate::types::SzFloat;
@@ -67,9 +67,10 @@ impl<T: SzFloat, D: Decomposition<T>, E: Encoder, L: Lossless> GenericCompressor
         if n > self.decomposition.max_bins(conf) as u64 {
             return corrupt("more bins than the data has elements");
         }
-        let bins = self.encoder.decode(&mut r, n as usize)?;
-        drop(buf);
-        self.decomposition.decompress(conf, &bins, out)
+        let mut bins = self.encoder.decode_stream(&mut r, n as usize)?;
+        let res = self.decomposition.decompress_stream(conf, &mut bins, out);
+        // a damaged bin stream explains whatever the decomposition made of it
+        bins.finish().and(res)
     }
 }
 
@@ -79,6 +80,9 @@ impl<T: SzFloat> Decomposition<T> for Box<dyn Decomposition<T>> {
     }
     fn decompress(&mut self, conf: &Config, bins: &[i32], out: &mut [T]) -> Result<()> {
         (**self).decompress(conf, bins, out)
+    }
+    fn decompress_stream(&mut self, conf: &Config, bins: &mut BinStream, out: &mut [T]) -> Result<()> {
+        (**self).decompress_stream(conf, bins, out)
     }
     fn save(&mut self, out: &mut Vec<u8>) -> Result<()> {
         (**self).save(out)

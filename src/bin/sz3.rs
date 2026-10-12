@@ -244,18 +244,22 @@ fn read_values<T: SzData>(path: &str) -> Result<Vec<T>, String> {
 }
 
 fn write_values<T: SzData + std::fmt::Display>(path: &str, v: &[T], binary: bool) -> Result<(), String> {
-    let bytes = if binary {
+    if binary {
+        // in pieces, so the output is never held twice
+        let mut f = std::fs::File::create(path).map_err(|e| format!("cannot write {path}: {e}"))?;
         let mut b = Vec::new();
-        b.put_slice(v);
-        b
-    } else {
-        let mut s = String::new();
-        for x in v {
-            s += &format!("{}\n", fmt_text(x));
+        for c in v.chunks(1 << 16) {
+            b.clear();
+            b.put_slice(c);
+            std::io::Write::write_all(&mut f, &b).map_err(|e| format!("cannot write {path}: {e}"))?;
         }
-        s.into_bytes()
-    };
-    std::fs::write(path, bytes).map_err(|e| format!("cannot write {path}: {e}"))
+        return Ok(());
+    }
+    let mut s = String::new();
+    for x in v {
+        s += &format!("{}\n", fmt_text(x));
+    }
+    std::fs::write(path, s).map_err(|e| format!("cannot write {path}: {e}"))
 }
 
 /// `ostream << value`: integers as is, floats in `%g`.

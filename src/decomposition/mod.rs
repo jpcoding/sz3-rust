@@ -14,6 +14,7 @@ pub use timeseries::TimeSeriesDecomposition;
 
 use crate::bytes::Reader;
 use crate::config::Config;
+use crate::encoder::BinStream;
 use crate::error::{Error, Result};
 use crate::types::SzFloat;
 
@@ -24,6 +25,11 @@ pub trait Decomposition<T: SzFloat> {
     /// decomposition works in place.
     fn compress(&mut self, conf: &Config, data: &mut [T]) -> Result<Vec<i32>>;
     fn decompress(&mut self, conf: &Config, bins: &[i32], out: &mut [T]) -> Result<()>;
+    /// [`Decomposition::decompress`] from bins decoded on demand; by default all at once.
+    fn decompress_stream(&mut self, conf: &Config, bins: &mut BinStream, out: &mut [T]) -> Result<()> {
+        let v = bins.take_all()?;
+        self.decompress(conf, &v, out)
+    }
     fn save(&mut self, out: &mut Vec<u8>) -> Result<()>;
     /// Reads what `save` wrote; `conf` is the trusted configuration of the data.
     fn load(&mut self, r: &mut Reader, conf: &Config) -> Result<()>;
